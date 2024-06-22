@@ -31,8 +31,8 @@ The method `pid` takes two arguments, a current process variable value and a tim
 
     loop: execute once every 'interval' seconds:
         pv = ... read process value from the controlled device ...
-	cv = p.pid(pv, dt=interval)
-	... send cv to the controlled device ...
+        cv = p.pid(pv, dt=interval)
+        ... send cv to the controlled device ...
 
 ## Ti, Td vs Ki, Kd
 
