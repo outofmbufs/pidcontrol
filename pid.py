@@ -227,6 +227,11 @@ class PIDPlus(PID):
         # Whatever 'u' came through all that ... that's the result!
         return cx.u
 
+    def findmod(self, modclass):
+        for m in self.modifiers:
+            if isinstance(m, modclass):
+                return m
+
 
 # PIDModifier/PIDHook system.
 #
@@ -330,6 +335,7 @@ class _PIDHookEvent:
 
 class PIDHookInitialConditions(_PIDHookEvent):
     NOTIFYHANDLER = 'PH_initial_conditions'
+    DEFAULTED_VARS = dict(setpoint=None)
 
 
 class PIDHookSetpoint(_PIDHookEvent):
@@ -457,6 +463,9 @@ class SetpointRamp(PIDModifier):
         self._initialize_state(event.setpoint)
 
     def _initialize_state(self, setpoint):
+        # setpoint can be None meaning use existing setpoint
+        if setpoint is None:
+            setpoint = self.setpoint
         self._start_sp = setpoint    # starting setpoint
         self._target_sp = setpoint   # ending setpoint
         self._countdown = 0          # time remaining in ramp
