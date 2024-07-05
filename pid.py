@@ -460,12 +460,11 @@ class SetpointRamp(PIDModifier):
         self._initialize_state(0)
 
     def PH_initial_conditions(self, event):
-        self._initialize_state(event.setpoint)
+        # If the setpoint is unchanged (carried forward) it is None...
+        sp = event.pid.setpoint if event.setpoint is None else event.setpoint
+        self._initialize_state(sp)
 
     def _initialize_state(self, setpoint):
-        # setpoint can be None meaning use existing setpoint
-        if setpoint is None:
-            setpoint = self.setpoint
         self._start_sp = setpoint    # starting setpoint
         self._target_sp = setpoint   # ending setpoint
         self._countdown = 0          # time remaining in ramp
