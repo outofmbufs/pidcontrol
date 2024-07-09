@@ -61,8 +61,9 @@ class PID:
         if pv is not None:
             self.integration = 0        # For I: the current integral
             self.previous_pv = pv       # For D: previous process variable
+            self.pv = pv                # observed process variable value
 
-            self.pv = pv          # observed process variable value
+        self.last_pid = (0, 0, 0)
 
     def pid(self, pv, /, *, dt=None):
         """Return the new commanded control value for the most recent pv/dt.
@@ -72,7 +73,7 @@ class PID:
               Startup sequence should be something like:
                   z = PID(Kp=foo, Ki=bar, Kd=baz)
                   z.pv = current process value    # this line is optional
-                  wait some amount of time (=dt)
+                  (optionally) wait dt seconds    # ok to not wait first time
                   u = z.pid(newpv, dt)
         """
         self.pv = pv
