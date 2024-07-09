@@ -124,6 +124,7 @@ class PID:
         return dpv
 
     def _u(self, p, i, d):
+        self.last_pid = (p, i, d)
         return (p * self.Kp) + (i * self.Ki) + (d * self.Kd)
 
 
