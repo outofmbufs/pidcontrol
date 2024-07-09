@@ -1,7 +1,7 @@
 # pidcontrol
 A simple PID controller, in python.
 
-See, for example, [Wikipedia PID](https://en.wikipedia.org/wiki/Proportional%E2%80%93integral%E2%80%93derivative_controller) for more explanation.
+See [Wikipedia PID](https://en.wikipedia.org/wiki/Proportional%E2%80%93integral%E2%80%93derivative_controller) for a complete explanation of PID controllers.
 
 ## Creating a controller
 To create a simple P/I/D (proportional/integral/derivative) controller:
@@ -13,14 +13,25 @@ where foo/bar/baz (Kp=/Ki=/Kd=) are the gain constants for the respective contro
 
 ## Terminology
 
-- **controlled-device**: The overall mechanism being controlled. It has an input which is the `control-variable`, a desired result which is the `setpoint`, and a current measured condition which is the `process-variable`.
-- **process-variable**: The measured value from the controlled device. Wikipedia (referenced above) calls this `y(t)`, a function of time as it varies thoughout operation of the device.
-- **setpoint**: The target value for the process-variable. Wikipedia calls this `r(t)`.
-- **control-variable**: The value that is computed by the PID controller and gets sent to the controlled device. Wikipedia calls this `u(t)`.
+Refer to this drawing:
 
-Note that sometimes the units of the control variable are different from the units of the process variable. For example, in an automobile cruise-control application, the process variable is the speed in mph. The setpoint, which always has the same units as the process variable, would also be in mph. However, the control variable is "percentage implied application of the accelerator pedal" or something along those lines.
+![](wikipid.png)
 
-The Kp/Ki/Kd gain values will be specific to each application and could vary widely in order-of-magnitude from one application to another depending on the relationship of the process and control variables.
+from the Wikipedia PID article.
+
+Attribution: [Arturo Urquizo](https://commons.wikimedia.org/wiki/File:PID.svg), [CC BY-SA 3.0](https://creativecommons.org/licenses/by-sa/3.0/), via Wikimedia Commons
+
+
+- **controlled-device**: The overall mechanism being controlled. "Plant/Process" in the above picture. It has one input, `u(t)` or the "control variable" and one output, `y(t)` or the "process variable". For example, the control variable might be the position of a valve, and the output variable might be a measured resulting temperature. 
+- **process-variable** or `y(t)`: The measured value from the controlled device.
+- **setpoint** or `r(t)`: The target ("reference") value for the process-variable.
+- **control-variable** or `u(t)`: The value computed by the PID controller and sent to the controlled device.
+
+The units of `u(t)` and `y(t)` are often different; the gain constants Kp/Ki/Kd are therefore application-specific in their general order of magnitude. For example, in an automobile cruise-control application the process variable is the speed in mph. The setpoint, which always has the same units as the process variable, would also be in mph. However, the control variable will be something such as "percentage implied application of the accelerator pedal."
+
+
+## Picking the gain constants ("tuning")
+Choosing reasonable values for Kp/Ki/Kd is critical for proper operation; however, it is highly application-specific and hard to give general advice. Refer to the Wikipedia article for several references to tuning methods.
 
 
 ## Running a control loop
@@ -36,12 +47,11 @@ The method `pid` takes two arguments, a current process variable value and a tim
 
 ## Ti, Td vs Ki, Kd
 
-No support for the "integration time" and "derivative time" form of control constants is provided, even though in general those are the much more convenient form for tuning and understanding a PID controller. Calling code can easily provide the conversion itself:
+Support for the `Ti` ("integration time") and `Td` ("derivative time") form of control constants is not provided. If using Ti/Td is preferred, perform this conversion before constructing the PID:
 
     Ki = Kp / Ti
     Kd = Kp * Td
 
-if if wants to allow users to specify those constants in their time form. Note that in this form there is no explicit way to set Ki to zero (which is one reason the PID class only supports the Kx forms; the other reason being stone-cold simplicity and laziness).
 
 ## Derivative Term Calculation
 The PID() class calculates the derivative term based on the change of the process variable, not the change of the computed error (difference between setpoint and process variable). If the setpoint never changes, the two computation methods are identical. If the setpoint changes, there will be a one-interval spike (so-called "derivative-kick") in the D calculation; using the process variable instead avoids this kick.
@@ -51,11 +61,12 @@ it is desirable to use the delta-e calculation instead of delta-pv.
 
 
 ## Public Attributes and Methods
-In these examples, p is a PID() object.
 
-- **p.initial_conditions(pv=None, setpoint=None)**: Call this to establish initial conditions for the process variable and/or the setpoint. Using this function to establish those initial values will prevent any false "kick" in the control variable signal from an implicitly-spurious instantaneous pv change and/or setpoint change.
+- *object*.**initial_conditions(pv=None, setpoint=None)**: Call this to establish initial conditions for the process variable and/or the setpoint. Using this function to establish those initial values will prevent any false "kick" in the control variable signal from an implicitly-spurious instantaneous pv change and/or setpoint change.
 
-- **p.setpoint**: Public attribute. The setpoint. See `initial_conditions` for establishing this at startup time as an initialization step, but if the setpoint in the controlled device can change over time, that is done by simply assigning to the `setpoint` attribute.
+- *object*.**setpoint**: Public attribute. The setpoint. Can be set directly any time the desired reference value changes; however, see the `initial_conditions` method for a discussion on how to best set this at startup time.
+
+- *object*.**last_pid**: Public attribute. A tuple containing the last three, unweighted, values for the Proportional ("error"), Integral, and Derivative control variales. NOTE: This attribute will not be present until at least one pid() call has been made.
 
 
 ## Simple PID() Example
@@ -67,9 +78,9 @@ See pidexample.py for an example. Try running it like this:
 
 ## PID Algorithm Addons: PIDPlus class
 
-The `PID` class implements zero options for algorithm enhancements. There are, however, several modifications to the simple PID algorithm that are sometimes helpful or even necessary. To support those, use the `PIDPlus` class and supply one or more of the `PIDModifiers` as described here.
+The simple PID algorithm works well enough in most cases, but sometimes modifications are needed to achieve adequate control. The class `PIDPlus` provides several such enhancements, and a framework for adding more.
 
-The following features are available as "modifiers":
+The following features are available as `PIDPlus` "modifiers":
 
 - **Setpoint Ramping**: Any time p.setpoint is changed, instead of the change taking effect immediately it will be ramped-in over a configurable time period. In applications where the setpoint does indeed change midstream, this may be useful in reducing or eliminating abrupt control change behavior (especially overshoot).
 
