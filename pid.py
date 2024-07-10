@@ -382,8 +382,9 @@ class PIDModifier:
 class PIDHistory(PIDModifier):
     """Adds a look-back record of control computations to a PID."""
 
-    def __init__(self, n, /):
+    def __init__(self, n, *args, **kwargs):
         """Adds a record of the past 'n' control computations to a PID."""
+        super().__init__(*args, **kwargs)
         self.history = deque([], n)
 
     # this _default method gets all events and logs them
@@ -394,7 +395,8 @@ class PIDHistory(PIDModifier):
 class I_Windup(PIDModifier):
     """Enhances I control with "windup" limit."""
 
-    def __init__(self, w, /):
+    def __init__(self, w, *args, **kwargs):
+        super().__init__(*args, **kwargs)
         """The integration value will be held to [-w, w] range."""
         if w < 0:
             raise ValueError(f"windup ({w=}) must not be negative.")
@@ -410,12 +412,13 @@ class I_Windup(PIDModifier):
 class I_SetpointReset(PIDModifier):
     """Reset integration, with optional pause, when setpoint changes."""
 
-    def __init__(self, secs, /):
+    def __init__(self, secs, *args, **kwargs):
         """Resets integration on setpoint change, and pause it 'secs'.
 
         NOTE: 'secs' can be zero, in which case a setpoint change resets the
               integration, but restarts it immediately (i.e, 0 second pause).
         """
+        super().__init__(*args, **kwargs)
         self.integration_pause = secs
         self._initialize_state()
 
@@ -451,8 +454,9 @@ class I_SetpointReset(PIDModifier):
 class SetpointRamp(PIDModifier):
     """Add setpoint ramping (smoothing out setpoint changes) to a PID"""
 
-    def __init__(self, secs, /):
+    def __init__(self, secs, *args, **kwargs):
         """Smooth (i.e., ramp) setpoint changes over 'secs' seconds."""
+        super().__init__(*args, **kwargs)
         if secs < 0:
             raise ValueError(f"ramp time (={secs}) must not be negative")
 
@@ -518,10 +522,11 @@ class SetpointRamp(PIDModifier):
 #
 class BangBang(PIDModifier):
     """Implement bang-bang control."""
-    def __init__(self, /, *,
+    def __init__(self, *args,
                  on_threshold=0, off_threshold=0,
                  on_value=1, off_value=0,
-                 dead_value=None):
+                 dead_value=None,
+                 **kwargs):
         """Threshold semantics are:
         If the OFF threshold is None and ON not None:
               ON: >= on_threshold
@@ -536,6 +541,7 @@ class BangBang(PIDModifier):
             OFF: <= off_threshold
            DEAD: > on and < off
         """
+        super().__init__(*args, **kwargs)
         self.on_threshold = on_threshold
         self.off_threshold = off_threshold
         self.on_value = on_value
