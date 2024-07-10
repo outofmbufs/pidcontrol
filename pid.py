@@ -380,12 +380,11 @@ class _PIDHookEvent:
         # attribute names, including the readonly ones, and not any
         # of the privatized ("underlying") names.
         #
-        # As a notational convenience, _ReadOnlyDescrr.vars() accepts None
+        # As a notational convenience, _ReadOnlyDescr.vars() accepts None
         cv = {a: getattr(clone, a) for a in self._ReadOnlyDescr.vars(clone)}
 
         for k, v in ChainMap(cv, kwargs, self.DEFAULTED_VARS).items():
-            rw = (k != 'pid') and (self.RW_VARS == '*' or k in self.RW_VARS)
-            if rw:
+            if (k != 'pid') and (self.RW_VARS == '*' or k in self.RW_VARS):
                 setattr(self, k, v)
             else:
                 self._ReadOnlyDescr.establish_property(k, v, obj=self)
@@ -413,9 +412,11 @@ class _PIDHookEvent:
         return self            # notational convenience
 
     def __repr__(self):
-        s = self.__class__.__name__ + f"(pid={self.pid!r}"
-        for a in filterfalse(lambda x: x == 'pid', vars(self)):
-            s += f", {a}={getattr(self, a)!r}"
+        s = self.__class__.__name__
+        pre = "("
+        for a in self._ReadOnlyDescr.vars(self):
+            s += f"{pre}{a}={getattr(self, a)!r}"
+            pre = ", "
         return s + ")"
 
 
