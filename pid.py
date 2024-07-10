@@ -343,17 +343,17 @@ class _PIDHookEvent:
 
         @classmethod
         def vars(cls, obj):
-            """Generate ALL attribute names, whether readonly or not."""
-
-            # notationally convenient to allow None
+            """like vars() but finesse readonly name shenanigans."""
+            # notationally convenient to allow obj to be None
             if obj is None:
-                return
+                return {}
 
-            for a in vars(obj):
+            vd = {}
+            for a, v in vars(obj).items():
                 if a.startswith(cls._PVTPREFIX):
-                    yield a[len(cls._PVTPREFIX):]
-                else:
-                    yield a
+                    a = a[len(cls._PVTPREFIX):]
+                vd[a] = v
+            return vd
 
         def __get__(self, obj, objtype=None):
             if obj is None:
@@ -381,8 +381,7 @@ class _PIDHookEvent:
         # of the privatized ("underlying") names.
         #
         # As a notational convenience, _ReadOnlyDescr.vars() accepts None
-        cv = {a: getattr(clone, a) for a in self._ReadOnlyDescr.vars(clone)}
-
+        cv = {a: v for a, v in self._ReadOnlyDescr.vars(clone).items()}
         for k, v in ChainMap(cv, kwargs, self.DEFAULTED_VARS).items():
             if (k != 'pid') and (self.RW_VARS == '*' or k in self.RW_VARS):
                 setattr(self, k, v)
@@ -411,11 +410,15 @@ class _PIDHookEvent:
 
         return self            # notational convenience
 
+    def vars(self):
+        """Built-in vars returns gibberish for readonly's; this doesn't."""
+        return self._ReadOnlyDescr.vars(self)
+
     def __repr__(self):
         s = self.__class__.__name__
         pre = "("
-        for a in self._ReadOnlyDescr.vars(self):
-            s += f"{pre}{a}={getattr(self, a)!r}"
+        for a, v in self.vars().items():
+            s += f"{pre}{a}={v!r}"
             pre = ", "
         return s + ")"
 
