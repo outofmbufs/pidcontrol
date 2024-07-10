@@ -940,4 +940,35 @@ if __name__ == "__main__":
                 ebozo.pid = 'bonzo'
             self.assertEqual(ebozo.pid, 'bozo')
 
+        def test_readme_1(self):
+            # just testing an example given in the README.md
+            class SetpointPercent(PIDModifier):
+                def PH_setpoint_change(self, event):
+                    event.sp_now = event.sp_set / 100
+
+            z = PIDPlus(Kp=1, modifiers=SetpointPercent())
+            z.setpoint = 50
+            self.assertEqual(z.setpoint, 50/100)
+
+        def test_readme_2(self):
+            # just testing another example fromthe README.md
+            class UBash(PIDModifier):
+                def PH_precalc(self, event):
+                    event.u = .666
+
+            z = PIDPlus(Kp=1, modifiers=UBash())
+            self.assertEqual(z.pid(0, dt=0.01), 0.666)
+
+        def test_readme_3(self):
+            # yet another README.md example test
+            class SetpointPercent(PIDModifier):
+                def PH_precalc(self, event):
+                    event.e = (event.pid.setpoint / 100) - event.pid.pv
+
+            z = PIDPlus(Kp=1, modifiers=SetpointPercent())
+            z.setpoint = 50
+            u = z.pid(0, dt=0.01)
+            self.assertEqual(z.setpoint, 50)
+            self.assertEqual(u, 50 / 100)
+
     unittest.main()
