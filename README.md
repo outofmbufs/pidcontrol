@@ -37,12 +37,12 @@ Choosing reasonable values for Kp/Ki/Kd is critical for proper operation; howeve
 ## Running a control loop
 The method `pid` takes two arguments, a current process variable value and a time interval (the delta-t between this pv measurement and prior). In a typical use the interval is constant, so in pseudo-code a common coding idiom is:
 
-    p = PID(Kp=foo, Ki=bar, Kd=baz)     # constants need to be determined
+    z = PID(Kp=foo, Ki=bar, Kd=baz)     # constants need to be determined
     interval = 0.1                      # 100msec
 
     loop: execute once every 'interval' seconds:
         pv = ... read process value from the controlled device ...
-        cv = p.pid(pv, dt=interval)
+        cv = z.pid(pv, dt=interval)
         ... send cv to the controlled device ...
 
 ## Ti, Td vs Ki, Kd
@@ -54,10 +54,10 @@ Support for the `Ti` ("integration time") and `Td` ("derivative time") form of c
 
 
 ## Derivative Term Calculation
-The PID() class calculates the derivative term based on the change of the process variable, not the change of the computed error (difference between setpoint and process variable). If the setpoint never changes, the two computation methods are identical. If the setpoint changes, there will be a one-interval spike (so-called "derivative-kick") in the D calculation; using the process variable instead avoids this kick.
+The PID() class calculates the derivative term based on the change of the process variable, not the change of the computed error (difference between setpoint and process variable). In applications where the setpoint never changes, the two computation methods are identical. In applications where the setpoint can change from time to time, using the computed error results in a one-interval spike (so-called "derivative-kick") in the D calculation; whereas using the process variable instead avoids this kick.
 
 See `PIDPlus` and the `D_DeltaE` PIDModifier class if, for some reason,
-it is desirable to use the delta-e calculation instead of delta-pv.
+it is desirable to use the delta-e calculation instead of delta-pv despite the derivative-kick problem.
 
 
 ## Public Attributes and Methods
@@ -66,7 +66,9 @@ it is desirable to use the delta-e calculation instead of delta-pv.
 
 - *object*.**setpoint**: Public attribute. The setpoint. Can be set directly any time the desired reference value changes; however, see the `initial_conditions` method for a discussion on how to best set this at startup time.
 
-- *object*.**last_pid**: Public attribute. A tuple containing the last three, unweighted, values for the Proportional ("error"), Integral, and Derivative control variales. NOTE: This attribute will not be present until at least one pid() call has been made.
+- *object*.**pid(pv, dt)**: Perform a PID calculation given a current process-variable value and a delta-t (in seconds, floating point) for the interval between calls. Returns the new control-variable (`u(t)`) value.
+
+- *object*.**last_pid**: Public attribute. A tuple containing the last three, unweighted, values for the Proportional ("error"), Integral, and Derivative control variables.
 
 
 ## Simple PID() Example
@@ -78,15 +80,15 @@ See pidexample.py for an example. Try running it like this:
 
 ## PID Algorithm Addons: PIDPlus class
 
-The simple PID algorithm works well enough in most cases, but sometimes modifications are needed to achieve adequate control. The class `PIDPlus` provides several such enhancements, and a framework for adding more.
+The simple PID algorithm works well enough in most cases, but sometimes modifications are needed to achieve adequate control. The class `PIDPlus` provides several such enhancements and a framework for adding more.
 
 The following features are available as `PIDPlus` "modifiers":
 
-- **Setpoint Ramping**: Any time p.setpoint is changed, instead of the change taking effect immediately it will be ramped-in over a configurable time period. In applications where the setpoint does indeed change midstream, this may be useful in reducing or eliminating abrupt control change behavior (especially overshoot).
+- **Setpoint Ramping**: Any time *object*.setpoint is changed, instead of the change taking effect immediately it will be ramped-in over a configurable time period. In applications where the setpoint does indeed change midstream, this may be useful in reducing or eliminating abrupt control change behavior (especially overshoot).
 
-- **Integration windup protection**: A large setpoint change (or other dynamic conditions) can cause a large integration term to accumulate; it may take a long time (and distort the controller behavior) for that to be worked off with a corresponding cumulative error in the oppsite direction. This is sometimes called "windup". Windup protection allows an absolute limit to be set on the integration term value.
+- **Integration windup protection**: A large setpoint change (or other dynamic conditions) can cause excessive accumulation in the integration term. The excess will persist (and distort control output) until there has been sufficient cumulative time spent with an opposite error. Among other problems, this can cause overshoot and a slower return to the commanded setpoint. This excessive accumulation is (sometimes) called *integral windup*. Windup protection allows an absolute limit to be set on the integration term value, thus limiting the amount of windup possible. Setting this value correctly requires application-specific knowledge; in particular note that low values will limit the control authority range of the integration term.
 
-- **Integration reset and pause**: When the setpoint is changed, it may be desirable to reset the integration term back to zero, and optionally cause the integration accumulation to pause for a little while for the other controls to settle into a steadier state. This is another approach to mitigating the same type of problem that windup protection attempts to solve.
+- **Integration reset and pause**: When the setpoint is changed, it may be desirable to reset the integration term back to zero, and optionally cause the integration accumulation to pause for a little while for the other controls to settle into a steadier state. This is another approach to mitigating the same type of problem that windup protection attempts to solve. This solution is close to emulating a new cold-start of the controller with a new setpoint.
 
 - **History Recording**: This modifier doesn't affect any algorithm operation but provides a lookback of controller computations. Can be useful during tuning and debugging.
 
@@ -96,9 +98,9 @@ The following features are available as `PIDPlus` "modifiers":
 
 ## Using PIDPlus with Modifiers
 
-Each PIDModifier is a class. To use a modifier, an object is instantiated and this is where modifier-specific arguments are provided. One or more of these objects is then passed to PIDPlus via the `modifiers` argument; the result is a PIDPlus controller object that will behave according to the underlying PID algorithm as modified by the list of provided modifiers.
+To create a PIDPlus control object, first a list of PIDModifier objects must be set up.  Each PIDModifier object represents a specific behavior modification with specific parameters. These objects are then passed in to PIDPlus along with the standard PID parameters (Kp/Kd/Ki).
 
-The __init__ arguments for each PIDModifier are specific below, but as a way of introductory example consider this code:
+Details shown below, but first an example:
 
     from pid import PIDPlus, PIDHistory
     
@@ -109,19 +111,19 @@ The __init__ arguments for each PIDModifier are specific below, but as a way of 
     # Note in this case there is only one modifier and it can
     # be supplied directly; if there were multiple they can
     # instead be supplied as 'modifiers=[modifier_1, modifier_2, etc]'
-    p = PIDPlus(Kp=foo, Ki=bar, Kd=baz, modifiers=h)
+    z = PIDPlus(Kp=foo, Ki=bar, Kd=baz, modifiers=h)
 
-    ... do the normal things with p
+    ... do the normal things with z
 
     # The history collected by PIDHistory is available as an
-    # attribute of the object:
+    # attribute of the PIDHistory object:
     print(h.history)              # for example, to see the record
 
-The specific modifier class names and __init__ signatures are:
+The specific PIDModifier class names and __init__ signatures are:
 
 ### SetpointRamp
 
-Example usage - to cause all modifications of p.setpoint to be ramped in over a period of 1.5 seconds:
+Example usage - to cause all modifications of z.setpoint to be ramped in over a period of 1.5 seconds:
 
     m = SetpointRamp(1.5)
 
@@ -179,6 +181,8 @@ This one is complicated; quoting from the __init__ signature and doc string:
        DEAD: > on and < off
 
 
+It implements a bang-bang controller with an optional middle "dead" zone (which is really a third potential control variable value). It is not likely to be useful but does demonstrate the capabilities of the PIDModifier system.
+
 ### D_DeltaE
 
 There are two forms. The simplest is:
@@ -197,9 +201,9 @@ Here is a code example for a PIDPlus that uses setpoint ramping, windup limit, a
     windup = I_Windup(4.2)        # limit integration to [-4.2, 4.2]     
     h = PIDHistory(1000)          # keep 1000 history records
     
-    p = PIDPlus(Kp=foo, Ki=bar, Kd=baz, modifiers=[ramp, windup, h])
+    z = PIDPlus(Kp=foo, Ki=bar, Kd=baz, modifiers=[ramp, windup, h])
 
-Note that the order of the modifiers in that list is significant: they will be activated in that order each time p.pid() calculates values. This is irrelevant for most of the modifiers; however, it may be important to think about where to put the PIDHistory modifier depending on what it is you are trying to see. The PIDHistory modifier is actually one that can be meaningfully instantiated multiple times, thus:
+Note that the order of the modifiers in that list is significant: they will be activated in that order each time z.pid() calculates values. This is irrelevant for most of the modifiers; however, it may be important to think about where to put the PIDHistory modifier depending on what it is you are trying to see. The PIDHistory modifier is actually one that can be meaningfully instantiated multiple times, thus:
 
     ramp = SetpointRamp(1.5)      # ramp over 1.5 seconds
     windup = I_Windup(4.2)        # limit integration to [-4.2, 4.2]     
@@ -209,3 +213,168 @@ Note that the order of the modifiers in that list is significant: they will be a
     p = PIDPlus(Kp=foo, Ki=bar, Kd=baz, modifiers=[h1, ramp, windup, h2])
 
 In this example, h1.history would have the records from BEFORE the ramp and windup handlers ran; h2.history would have the records from AFTER. Instantiating a PIDPlus with multiple objects of other modifiers (e.g., SetpointRamp) is not generally useful (and the exact behavior may be implementation-dependent).
+
+## Writing a PIDModifier
+
+A custom PIDModifier interacts with one or more PIDHookEvent notifications by providing a handler method for that notification. There are 5 PIDHookEvent types, each with a specific notification method name as noted here:
+
+- PIDHookInitialConditions: generated when the 'initial_conditions()' method is invoked on a PIDPlus object. PIDModifier method name: `PH_initial_conditions` .
+
+- PIDHookSetpoint: generated when the setpoint attribute is set on a PIDPlus object. PIDModifier method name: `PH_setpoint_change` .
+
+- PIDHookPreCalc, PIDHookMidCalc, PIDHookPostCalc: generated at the beginning, middle, and end of the PID calculation. These three spots offer different ways of modifying the PID control calculation. PIDModifier method names: `PH_precalc` , `PH_midcalc` , `PH_postcalc` .
+
+In addition to the specific method names mentioned above,  each notification subclass defines its own 'event' object which will be passed to those handler methods. The specific event objects will be described later.
+
+To create a new modification type, subclass PIDModifier and supply a handler for every event of interest. For example, to create a PIDModifier that will interact with PIDHookSetpoint events and PIDHookMidCalc events:
+
+    class ExampleModification(PIDModifier):
+        def PH_setpoint_change(self, event):
+            print(f"setpoint change event: {event}")
+
+        def PH_midcalc(self, event):
+            print(f"midcalc change event: {event}")
+
+A modification can declare its own __init__ method if it needs additional parameters. Best practice includes using *args/**kwargs and super() to continue the __init__ calls up the subclass chain. So, as a trivial example, to add a 'foo' parameter to the ExampleModification:
+
+    class ExampleModification(PIDModifier):
+        def __init__(self, foo, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.foo = foo
+
+        # and print that name when an event occurs
+        def PH_setpoint_change(self, event):
+            print(f"setpoint change event: {event}, foo: {foo}")
+
+        def PH_midcalc(self, event):
+            print(f"midcalc event: {event}, foo: {foo}")
+
+which is the same as the first example but now includes a 'foo' parameter that presumably would be used for something in a real example.
+
+A PIDModifier can also define a catch-all handler, called `PH_default` . It receives notifications this PIDModifier doesn't otherwise handle explicitly. As an example, here is the complete code for the PIDHistory modifier:
+
+    class PIDHistory(PIDModifier):
+        def __init__(self, n, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.history = deque([], n)
+
+        # this _default method gets all events and stores them
+        def PH_default(self, event):
+            self.history.append(event)
+
+This works by creating a deque (from collections) in the PIDHistory object, and simply entering every event (caught by `PH_default`) into it. Refer back to the PIDHistory example given in the `PIDPlus` discussion to see how this would be used.
+
+As will be described next, each event contains its own set of attributes specific to that event. Some of the attributes are read-only, emphasizing that changing them will have no effect on the PIDPlus operation. Others are read-write and changing them will have event-specific semantics as discussed with each event below.
+
+The specific events, and associated semantics, for each PIDHook event are:
+
+**PIDHookInitialConditions**:
+Event is generated AFTER the `initial_conditions()` method has completed modifying the PIDPlus object.
+
+READ-ONLY ATTRIBUTES:
+- `pid` -- the PIDPlus object
+- `setpoint` -- the `setpoint` argument specified in the corresponding `initial_conditions()` method invocation. NOTE: Can be None.
+- `pv` -- the `pv`argument; can be None.
+
+Semantic notes: As noted above, this event is generated **after** the initial_conditions method has modified the `pid` object. 
+
+**PIDHookSetpoint**:
+Event is generated BEFORE any modifications in the underlying PIDPlus object occur. This gives the handler the opportunity to affect the setpoint change.
+
+There is one read/write attribute and the rest are read-only.
+
+READ-WRITE ATTRIBUTES:
+- `sp_now` -- If the handler sets this attribute to something other than None (i
+ts default), then this value is used to set the setpoint.
+
+READ-ONLY ATTRIBUTES:
+- `pid` -- the PIDPlus object
+- `sp_prev` -- the setpoint value prior to any modification.
+- `sp_set` -- the setpoint value that was requested to be set by the application (see discussion below). 
+
+
+Semantic notes: As noted above, this event is generate **before** the assignment to the setpoint attribute. This allows handlers to change the value that gets assigned, by setting `sp_now` to something other than `sp_set` (`sp_set` itself is read-only)
+
+As a trivial example:
+
+    class SetpointPercent(PIDModifier):
+        def PH_setpoint_change(self, event):
+            event.sp_now = event.sp_set / 100
+
+This would allow users to use "percentages" for the setpoint, e.g.:
+
+    z = PIDPlus(Kp=1, modifiers=SetpointPercent())
+    z.setpoint = 50
+    print(z.setpoint)
+
+This will print 0.50 as the resulting setpoint (whether it is a good idea to implement something like this is up for debate, but it's a simple example). Another example later will show another (better) way to accomplish this without the mismatch between written and read .setpoint values.
+
+**PIDHookPreCalc**:
+This event is generated at the very beginning of the PID calculation (as a result of the `.pid()` method being invoked). It contains 1 read-only attribute and 5 read-write attributes:
+
+READ-WRITE ATTRIBUTES:
+- `e` -- the error value to use. Default: None.
+- `p` -- the (unweighted) proportional term value to use. Default: None.
+- `i` -- the (unweighted) integral term value to use. Default: None.
+- `d` -- the (unweighted) derivative term value to use. Default: None
+- `u` -- the control value to ultimately return. Default: None
+
+READ-ONLY ATTRIBUTES:
+- `pid` -- the PIDPlus object
+
+Semantic notes: throughout the three pre/mid/post calculation events, any time one of the five attributes `e`, `p`, `i`, `d`, and `u` are set to something other than None, they become the value for that parameter and will NOT be overwritten by the PIDPlus code from that point on in this iteration of the `pid()` calculation. Note, however, that they can certainly be overwritten by other modifiers further down the list if there are multiple modifiers in this PIDPlus.
+
+Consider this trivial example:
+
+    class UBash(PIDModifier):
+        def PH_precalc(self, event):
+            event.u = .666
+
+    z = PIDPlus(Kp=1, modifiers=UBash())
+    print(z.pid(0, dt=0.01)
+
+This will print 0.666 even though the control variable would otherwise normally be calculated to be "0" in this situation as the pv is equal to the (default) setpoint and only Kp is non-zero.
+
+Bashing `u` this early in the sequence is unlikely to be useful, but later in the sequence (i.e, in a postcalc handler) `u` could be usefully modified if it were necessary to restrict the range of it under certain conditions.
+
+Here is a better way to implement "setpoint as a percent" ... this precalc modifier sets the `e` value, which is normally computed as:
+
+    e = setpoint - pv
+
+but this overrides it as shown, to allow the setpoint to be scaled up by 100 (i.e., expressed as a percent) in the attribute, but be treated as a value between 0 and 1 in the error term calculation:
+
+    class SetpointPercent(PIDModifier):
+        def PH_precalc(self, event):
+            event.e = (event.pid.setpoint / 100) - event.pid.pv
+
+The underlying PIDPlus code only uses the setpoint in the `e` calculation, so by doing this calculation here the setpoint can be treated as scaled by 100.
+
+**PIDHookMidCalc**:
+After the precalc events are handled, the PIDPlus code fills in values for e/p/i/d (but not u) for any attribute not provided by any precalc handler and then generates a MidCalc event.
+
+READ-WRITE ATTRIBUTES:
+- `e` -- the current candidate error value. Will NEVER be None.
+- `p` -- the current candidate (unweighted) proportional term value. NEVER None.
+- `i` -- the current (unweighted) candidate integral term value. NEVER None.
+- `d` -- the current (unweighted) candidate derivative term value. NEVER None.
+- `u` -- the control value to ultimately return. Default: None
+
+READ-ONLY ATTRIBUTES:
+- `pid` -- the PIDPlus object
+
+Essentially this gives handlers of this event a second swing at the parameters, including the default values that the unmodified behavior would calculate anyway, with the exception of `u` (only visible in the postcalc event). A midcalc handler can still bash `u` here if it wants to override what would otherwise be the weighted combination of the given p/i/d values here.
+
+**PIDHookPostCalc**:
+The last of the three events during `.pid()` calculation. At this stage a candidate `u` value has been computed from the p/i/d terms. Only the `u` value can be overridden at this stage; the remaining attributes are read-only.
+
+
+READ-WRITE ATTRIBUTES:
+- `u` -- the candidate control value to ultimately return. Will NEVER be None.
+
+READ-ONLY ATTRIBUTES:
+- `pid` -- the PIDPlus object
+- `e` -- for reference: the error value. NEVER None.
+- `p` -- for reference: the (unweighted) proportional term value. NEVER None.
+- `i` -- for reference: the (unweighted) integral term value. NEVER None.
+- `d` -- for reference: the (unweighted) derivative term value. NEVER None.
+
