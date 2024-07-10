@@ -294,26 +294,52 @@ class _PIDHookEvent:
     RW_VARS = set()
 
     # Property/descriptor implementing read-only-ness
-    class _ReadOnly:
+    class _ReadOnlyDescr:
+        _PVTPREFIX = "__PVT_ReadOnly_"
+
+        # Factory for annointing PIDHookEvent classes with descriptors
+        # for any attributes that are enforced as read-only.
+        #    cls      -- will be (of course) this class
+        #    attrname -- name of a (to be set up) read-only attribute
+        #    value    -- its initial value
+        #    obj      -- the underlying PIDHookEvent OBJECT (not class)
+        #
+        # The obj.__class__ (something like, e.g., PIDHookSetpoint) needs
+        # a data descriptor property created for this attrname, but that
+        # property should only be created ONCE (per attrname, per class).
+        # In contrast, individual object instances each need, of course,
+        # their own instance variable (object attribute) for the underlying
+        # readonly value; that attribute name is built using _PVTPREFIX to
+        # distinguish it from ordinary (read/write) attrs.
         @classmethod
         def establish_property(cls, attrname, value, /, *, obj=None):
-            # obj is an INSTANCE of the underlying PIDHook.
-            # Need to establish the property, which is a class attribute.
-            # Only establish it once.
-            pidhook_class = obj.__class__
-            if not hasattr(pidhook_class, attrname):
-                # create a descriptor (a _ReadOnly) that will be
-                # set in the pidhook_class (not per-PIDHook object!)
-                descriptor = cls()
-                # Need a name for storing the underlying attribute value.
-                # Note that this underlying attribute is per-object (!)
-                # but the **NAME** is per pidhook_class (in the descriptor).
-                descriptor.__name = cls.__name__ + '_' + attrname
+            """Factory for creating the property descriptors (dynamically)."""
+
+            pidhook_class = obj.__class__    # e.g., PIDHookSetpoint, etc.
+
+            # See if there is already a data descriptor (i.e., if this is
+            # not the first time establish_property() has been called for
+            # this attrname on this cls.
+            try:
+                descriptor = getattr(pidhook_class, attrname)
+            except AttributeError:
+                # this code hasn't run yet, so there is no descriptor for
+                # this attrname in this pidhook_class. Make it.
+
+                descriptor = cls()         # i.e., a _ReadOnlyDescr()
+
+                # If "foo" is an attrname, something 'like' foo needs
+                # to be stored in the object (not the class) as the
+                # underlying read-only value for that instance.
+                # The name is arbitrarily constructed this way and saved
+                # ONCE in the descriptor for this attribute.
+                descriptor._name = cls._PVTPREFIX + attrname
+
+                # and this establishes the data descriptor on the class
                 setattr(pidhook_class, attrname, descriptor)
-            # There is now a property established for attrname.
-            # This sets it, which __set__ will allow, ONCE.
-            underlying_name = getattr(pidhook_class, attrname).__name
-            setattr(obj, underlying_name, value)
+
+            # now can just set the underlying attribute directly.
+            setattr(obj, descriptor._name, value)
 
         @classmethod
         def vars(cls, obj):
@@ -324,27 +350,23 @@ class _PIDHookEvent:
                 return
 
             for a in vars(obj):
-                if a.startswith(cls.__name__ + '_'):
-                    yield a[len(cls.__name__) + 1:]
+                if a.startswith(cls._PVTPREFIX):
+                    yield a[len(cls._PVTPREFIX):]
                 else:
                     yield a
 
         def __get__(self, obj, objtype=None):
             if obj is None:
                 return self
-            return getattr(obj, self.__name)
+            return getattr(obj, self._name)
 
         def __set__(self, obj, value):
-            # Note: "read-only" is actually implemented as "write-once".
-            #       This allows 'establish' to set the initial value
-            if not hasattr(obj, self.__name):
-                setattr(obj, self.__name, value)
             raise TypeError(
-                f"write to read-only attr '{self.__name}' not allowed")
+                f"write to read-only attr '{self._name}' not allowed")
 
         def __delete__(self, obj):
             raise TypeError(
-                f"attempted deletion of read-only attr '{self.__name}'")
+                f"attempted deletion of read-only attr '{self._name}'")
 
     def __init__(self, /, *, clone=None, **kwargs):
         # clone (if supplied) vars override kwargs, which in turn
@@ -358,15 +380,15 @@ class _PIDHookEvent:
         # attribute names, including the readonly ones, and not any
         # of the privatized ("underlying") names.
         #
-        # As a notational convenience, _ReadOnly.vars() accepts None
-        cv = {a: getattr(clone, a) for a in self._ReadOnly.vars(clone)}
+        # As a notational convenience, _ReadOnlyDescrr.vars() accepts None
+        cv = {a: getattr(clone, a) for a in self._ReadOnlyDescr.vars(clone)}
 
         for k, v in ChainMap(cv, kwargs, self.DEFAULTED_VARS).items():
             rw = (k != 'pid') and (self.RW_VARS == '*' or k in self.RW_VARS)
             if rw:
                 setattr(self, k, v)
             else:
-                self._ReadOnly.establish_property(k, v, obj=self)
+                self._ReadOnlyDescr.establish_property(k, v, obj=self)
 
     def notify(self, modifiers):
         """Invoke the notification handler for all modifiers.
