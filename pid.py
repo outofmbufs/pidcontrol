@@ -289,16 +289,84 @@ class _PIDHookEvent:
     # Subclasses can redefine this to supply default attribute values
     DEFAULTED_VARS = {}
 
+    # Subclasses MUST put attribute names in here for attributes
+    # that are writable (all other attributes will be read-only)
+    RW_VARS = set()
+
+    # Property/descriptor implementing read-only-ness
+    class _ReadOnly:
+        @classmethod
+        def establish_property(cls, attrname, value, /, *, obj=None):
+            # obj is an INSTANCE of the underlying PIDHook.
+            # Need to establish the property, which is a class attribute.
+            # Only establish it once.
+            pidhook_class = obj.__class__
+            if not hasattr(pidhook_class, attrname):
+                # create a descriptor (a _ReadOnly) that will be
+                # set in the pidhook_class (not per-PIDHook object!)
+                descriptor = cls()
+                # Need a name for storing the underlying attribute value.
+                # Note that this underlying attribute is per-object (!)
+                # but the **NAME** is per pidhook_class (in the descriptor).
+                descriptor.__name = cls.__name__ + '_' + attrname
+                setattr(pidhook_class, attrname, descriptor)
+            # There is now a property established for attrname.
+            # This sets it, which __set__ will allow, ONCE.
+            underlying_name = getattr(pidhook_class, attrname).__name
+            setattr(obj, underlying_name, value)
+
+        @classmethod
+        def vars(cls, obj):
+            """Generate ALL attribute names, whether readonly or not."""
+
+            # notationally convenient to allow None
+            if obj is None:
+                return
+
+            for a in vars(obj):
+                if a.startswith(cls.__name__ + '_'):
+                    yield a[len(cls.__name__) + 1:]
+                else:
+                    yield a
+
+        def __get__(self, obj, objtype=None):
+            if obj is None:
+                return self
+            return getattr(obj, self.__name)
+
+        def __set__(self, obj, value):
+            # Note: "read-only" is actually implemented as "write-once".
+            #       This allows 'establish' to set the initial value
+            if not hasattr(obj, self.__name):
+                setattr(obj, self.__name, value)
+            raise TypeError(
+                f"write to read-only attr '{self.__name}' not allowed")
+
+        def __delete__(self, obj):
+            raise TypeError(
+                f"attempted deletion of read-only attr '{self.__name}'")
+
     def __init__(self, /, *, clone=None, **kwargs):
         # clone (if supplied) vars override kwargs, which in turn
         # override DEFAULTED_VARS (usually supplied via subclassing).
         # ChainMap that all up and set the attributes.
-        if clone is not None:
-            cv = {a: getattr(clone, a) for a in vars(clone)}
-        else:
-            cv = {}
+
+        # readonly attributes won't be in (generic) vars(), and their
+        # underlying ("privatized") names will. So vars() is not
+        # (very) helpful. Instead, _Readonly class provides its own
+        # vars() implementation. This will return all the appropriate
+        # attribute names, including the readonly ones, and not any
+        # of the privatized ("underlying") names.
+        #
+        # As a notational convenience, _ReadOnly.vars() accepts None
+        cv = {a: getattr(clone, a) for a in self._ReadOnly.vars(clone)}
+
         for k, v in ChainMap(cv, kwargs, self.DEFAULTED_VARS).items():
-            setattr(self, k, v)
+            rw = (k != 'pid') and (self.RW_VARS == '*' or k in self.RW_VARS)
+            if rw:
+                setattr(self, k, v)
+            else:
+                self._ReadOnly.establish_property(k, v, obj=self)
 
     def notify(self, modifiers):
         """Invoke the notification handler for all modifiers.
@@ -330,8 +398,16 @@ class _PIDHookEvent:
 
 
 # with the above __init__ and notify as a framework, typically each
-# specific event is simply a subclass with a class attribute to
-# define its NOTIFYHANDLER method name and (if needed) the DEFAULTED_VARS.
+# specific event is simply a subclass with some class variables:
+#    NOTIFYHANDLER -- the name of the corresponding handler to invoke
+#    DEFAULTED_VARS -- dictionary of default attribute names/values that
+#                      will be used (if no explicit values given in init)
+#    RW_VARS        -- names of attributes that are allowed to be read-write.
+#                      The default for any attributes not in RW_VARS is
+#                      to enforce read-only access of them. As a special
+#                      case convenience, RW_VARS can be '*' (the string)
+#                      which will mean make all the attributes read/write
+#
 # Conceptually the NOTIFYHANDLER could have been programmatically
 # determined from the subclass name, but "explicit is better" won out here.
 
@@ -343,11 +419,13 @@ class PIDHookInitialConditions(_PIDHookEvent):
 class PIDHookSetpoint(_PIDHookEvent):
     NOTIFYHANDLER = 'PH_setpoint_change'
     DEFAULTED_VARS = dict(sp_now=None)
+    RW_VARS = {'sp_now'}
 
 
 # generic base for PreCalc/Mid/Post. Establishes the event default vars.
 class _PIDHook_Calc(_PIDHookEvent):
     DEFAULTED_VARS = dict(e=None, p=None, i=None, d=None, u=None)
+    RW_VARS = '*'
 
 
 class PIDHookPreCalc(_PIDHook_Calc):
@@ -360,6 +438,7 @@ class PIDHookMidCalc(_PIDHook_Calc):
 
 class PIDHookPostCalc(_PIDHook_Calc):
     NOTIFYHANDLER = 'PH_postcalc'
+    RW_VARS = 'u'         # setting others is a no-op, so prevent that error
 
 
 # Any PIDModifier that wants to stop hook processing raises this:
@@ -798,5 +877,41 @@ if __name__ == "__main__":
                 u = u2
             else:
                 raise ValueError(f"{i=}, {u2=}")
+
+        def test_readonlyvars(self):
+            class Foo(PIDModifier):
+                def PH_midcalc(self, event):
+                    event.d = 17
+
+                def PH_postcalc(self, event):
+                    if event.d != 17:
+                        raise ValueError(f"Got {event.d}")
+                    try:
+                        event.d += 1              # should fail
+                    except TypeError:
+                        event.u = event.d + 1     # this is expected to run
+
+            z = PIDPlus(Ki=1, modifiers=Foo())
+            u = z.pid(0, dt=1)
+            self.assertEqual(z.last_pid, (0, 0, 17))
+            self.assertEqual(u, 18)
+
+        def test_multi_readonly(self):
+            # tests that the property magic for read-only attrs
+            # works properly in the face of multiple hook objects
+            # (this was once a bug)
+            e1 = PIDHookPostCalc(pid='bozo', e=1)
+            e2 = PIDHookPostCalc(pid='bonzo', e=2)
+            self.assertEqual(e1.pid, 'bozo')
+            self.assertEqual(e1.e, 1)
+            self.assertEqual(e2.pid, 'bonzo')
+            self.assertEqual(e2.e, 2)
+
+        def test_pidreadonly(self):
+            # .pid should be readonly even if RW_VARS was '*'
+            ebozo = PIDHookPreCalc(pid='bozo', e=1)
+            with self.assertRaises(TypeError):
+                ebozo.pid = 'bonzo'
+            self.assertEqual(ebozo.pid, 'bozo')
 
     unittest.main()
