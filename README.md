@@ -92,7 +92,7 @@ The following features are available as `PIDPlus` "modifiers":
 
 - **History Recording**: This modifier doesn't affect any algorithm operation but provides a lookback of controller computations. Can be useful during tuning and debugging.
 
-- **Bang Bang**: This is probably rarely a useful modification; it was implemented primarily as a test of the PIDModifier system to see how far customization features could be pushed. This alters he behavior of the PID controller such that the control variable is always returned as a fully "on" value or a fully "off" value.
+- **Bang Bang**: This is probably rarely a useful modification; it was implemented primarily as a test of the PIDModifier system to see how far customization features could be pushed. This alters the behavior of the PID controller such that the control variable is always returned as a fully "on" value or a fully "off" value.
 
 - **Use Delta E for derivative**: This changes the algorithm so that the derivative term is computed based on the slope of the error term rather than the slope of the process variable. There is likely no real-world use for this plug-in but it is there so the two approaches can be compared.
 
@@ -284,8 +284,7 @@ Event is generated BEFORE any modifications in the underlying PIDPlus object occ
 There is one read/write attribute and the rest are read-only.
 
 READ-WRITE ATTRIBUTES:
-- `sp_now` -- If the handler sets this attribute to something other than None (i
-ts default), then this value is used to set the setpoint.
+- `sp_now` -- If the handler sets this attribute to something other than None (its default), then this value is used to set the setpoint.
 
 READ-ONLY ATTRIBUTES:
 - `pid` -- the PIDPlus object
