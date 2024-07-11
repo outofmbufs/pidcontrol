@@ -20,6 +20,7 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
+import copy
 from collections import deque, ChainMap
 from itertools import filterfalse
 from contextlib import contextmanager
@@ -215,7 +216,7 @@ class PIDPlus(PID):
                 setattr(cx, attr, f(cx.e))
 
         # note the vars from the PreCalc are cloned to the MidCalc
-        cx = PIDHookMidCalc(clone=cx).notify(self.modifiers)
+        cx = PIDHookMidCalc(**cx.vars()).notify(self.modifiers)
 
         # -- POST --
         # Generally 'u' calculation should be overridden in a PostCalc.
@@ -224,7 +225,7 @@ class PIDPlus(PID):
         if cx.u is None:
             cx.u = self._u(cx.p, cx.i, cx.d)
         # again note the vars from the MidCalc are cloned to the PostCalc
-        cx = PIDHookPostCalc(clone=cx).notify(self.modifiers)
+        cx = PIDHookPostCalc(**cx.vars()).notify(self.modifiers)
 
         # Whatever 'u' came through all that ... that's the result!
         return cx.u
@@ -341,13 +342,15 @@ class _PIDHookEvent:
             # now can just set the underlying attribute directly.
             setattr(obj, descriptor._name, value)
 
+        # readonly attributes won't be in (generic) vars(), and their
+        # underlying ("privatized") names will. So vars() is not
+        # (very) helpful. Instead, _Readonly class provides its own
+        # vars() implementation. This will return all the appropriate
+        # attribute names, including the readonly ones, and not any
+        # of the privatized ("underlying") names.
         @classmethod
         def vars(cls, obj):
             """like vars() but finesse readonly name shenanigans."""
-            # notationally convenient to allow obj to be None
-            if obj is None:
-                return {}
-
             vd = {}
             for a, v in vars(obj).items():
                 if a.startswith(cls._PVTPREFIX):
@@ -368,25 +371,16 @@ class _PIDHookEvent:
             raise TypeError(
                 f"attempted deletion of read-only attr '{self._name}'")
 
-    def __init__(self, /, *, clone=None, **kwargs):
-        # clone (if supplied) vars override kwargs, which in turn
-        # override DEFAULTED_VARS (usually supplied via subclassing).
-        # ChainMap that all up and set the attributes.
-
-        # readonly attributes won't be in (generic) vars(), and their
-        # underlying ("privatized") names will. So vars() is not
-        # (very) helpful. Instead, _Readonly class provides its own
-        # vars() implementation. This will return all the appropriate
-        # attribute names, including the readonly ones, and not any
-        # of the privatized ("underlying") names.
-        #
-        # As a notational convenience, _ReadOnlyDescr.vars() accepts None
-        cv = {a: v for a, v in self._ReadOnlyDescr.vars(clone).items()}
-        for k, v in ChainMap(cv, kwargs, self.DEFAULTED_VARS).items():
-            if (k != 'pid') and (self.RW_VARS == '*' or k in self.RW_VARS):
-                setattr(self, k, v)
-            else:
+    def __init__(self, /, **kwargs):
+        for k, v in ChainMap(kwargs, self.DEFAULTED_VARS).items():
+            if self.__readonly(k):
                 self._ReadOnlyDescr.establish_property(k, v, obj=self)
+            else:
+                setattr(self, k, v)
+
+    def __readonly(self, k):
+        # the 'pid' field is always readonly even in the '*' case
+        return k == 'pid' or (self.RW_VARS != '*' and k not in self.RW_VARS)
 
     def notify(self, modifiers):
         """Invoke the notification handler for all modifiers.
@@ -494,7 +488,7 @@ class PIDHistory(PIDModifier):
 
     # this _default method gets all events and logs them
     def PH_default(self, event):
-        self.history.append(event)
+        self.history.append(copy.copy(event))
 
 
 class I_Windup(PIDModifier):
@@ -970,5 +964,39 @@ if __name__ == "__main__":
             u = z.pid(0, dt=0.01)
             self.assertEqual(z.setpoint, 50)
             self.assertEqual(u, 50 / 100)
+
+        def test_history_copy(self):
+            # this in particular tests that the history captures the
+            # state of the events AT THE TIME in THAT POSITION in the
+            # modifications list. Basically it's a test that copy works.
+            class Clown(PIDModifier):
+                def __init__(self, name, *args, **kwargs):
+                    super().__init__(*args, **kwargs)
+                    self.clown = name
+
+                def PH_setpoint_change(self, event):
+                    event.sp_now = self.clown
+
+            h1 = PIDHistory(10)
+            h2 = PIDHistory(10)
+            h3 = PIDHistory(10)
+            bozo = Clown('bozo')
+            bonzo = Clown('bonzo')
+
+            z = PIDPlus(Kp=1, modifiers=[h1, bozo, h2, bonzo, h3])
+            z.setpoint = 7
+
+            e1 = h1.history[-1]
+            e2 = h2.history[-1]
+            e3 = h3.history[-1]
+
+            self.assertTrue(id(e1) != id(e2))
+            self.assertTrue(id(e1) != id(e3))
+            self.assertTrue(id(e2) != id(e3))
+            self.assertEqual(e1.sp_now, None)
+            self.assertEqual(e2.sp_now, 'bozo')
+            self.assertEqual(e3.sp_now, 'bonzo')
+            with self.assertRaises(TypeError):
+                e1.pid = None
 
     unittest.main()
