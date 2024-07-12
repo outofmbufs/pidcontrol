@@ -488,6 +488,12 @@ class PIDHistory(PIDModifier):
 
     # this _default method gets all events and logs them
     def PH_default(self, event):
+        # if PIDHistory is the last in the modifier list then copying
+        # the event is superfluous. But if there are modifiers after,
+        # they get the same event object (which is part of how the whole
+        # protocol works, after all) but presumably if this PIDHistory was
+        # placed earlier in the stack it was done so to capture the event
+        # state at that point. Therefore ... need to copy the event.
         self.history.append(copy.copy(event))
 
 
