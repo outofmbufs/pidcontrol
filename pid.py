@@ -230,11 +230,6 @@ class PIDPlus(PID):
         # Whatever 'u' came through all that ... that's the result!
         return cx.u
 
-    def findmod(self, modclass):
-        for m in self.modifiers:
-            if isinstance(m, modclass):
-                return m
-
 
 # PIDModifier/PIDHook system.
 #
