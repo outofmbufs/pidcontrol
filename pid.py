@@ -1000,4 +1000,27 @@ if __name__ == "__main__":
             with self.assertRaises(TypeError):
                 e1.pid = None
 
+        def test_hookstop(self):
+            # test HookStop - a modifier asking to abort further notifications
+            class Stopper(PIDModifier):
+                def PH_default(self, event):
+                    raise HookStop
+
+            class Count(PIDModifier):
+                count = 0
+
+                def PH_default(self, event):
+                    self.count += 1
+
+            c1 = Count()
+            c2 = Count()
+            stopper = Stopper()
+
+            z = PIDPlus(Kp=1, modifiers=[c1, stopper, c2])
+
+            # just the initialization will generate an event, which c1
+            # should have seen and c2 should not have seen.
+            self.assertEqual(c1.count, 1)
+            self.assertEqual(c2.count, 0)
+
     unittest.main()
