@@ -260,20 +260,20 @@ A PIDModifier can also define a catch-all handler, called `PH_default` . It rece
 
         # this _default method gets all events and stores them
         def PH_default(self, event):
-            self.history.append(event)
+            self.history.append(event.clone())
 
-This works by creating a deque (from collections) in the PIDHistory object, and simply entering every event (caught by `PH_default`) into it. Refer back to the PIDHistory example given in the `PIDPlus` discussion to see how this would be used.
+This works by creating a deque (from collections) in the PIDHistory object, and simply entering every event (caught by `PH_default`) into it. (It uses .clone() to enter a copy of the event, to capture it at the state it was in this position in the modification/notify list). Refer back to the PIDHistory example given in the `PIDPlus` discussion to see how this would be used.
 
 As will be described next, each event contains its own set of attributes specific to that event. Some of the attributes are read-only, emphasizing that changing them will have no effect on the PIDPlus operation. Others are read-write and changing them will have event-specific semantics as discussed with each event below.
 
 The specific events, and associated semantics, for each PIDHook event are:
 
 **PIDHookInitialConditions**:
-Event is generated AFTER the `initial_conditions()` method has completed modifying the PIDPlus object.
+Event is generated AFTER the `initial_conditions()` method has completed modifying the PIDPlus object. The intent of this event is to allow PIDModifier implementations a hook for (re)initializing their own state if the application uses the `initial_conditions` method to change pv and/or the setpoint.
 
 READ-ONLY ATTRIBUTES:
 - `pid` -- the PIDPlus object
-- `setpoint` -- the `setpoint` argument specified in the corresponding `initial_conditions()` method invocation. NOTE: Can be None.
+- `setpoint` -- the `setpoint` argument specified in the corresponding `initial_conditions()` method invocation. NOTE: Can be None (meaning: no setpoint change).
 - `pv` -- the `pv`argument; can be None.
 
 Semantic notes: As noted above, this event is generated **after** the initial_conditions method has modified the `pid` object. 
