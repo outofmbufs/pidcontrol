@@ -23,7 +23,6 @@
 import copy
 from collections import deque, ChainMap
 from itertools import filterfalse
-from contextlib import contextmanager
 
 
 class PID:
@@ -129,6 +128,16 @@ class PID:
         self.last_pid = (p, i, d)
         return (p * self.Kp) + (i * self.Ki) + (d * self.Kd)
 
+    def __repr__(self):
+        s = self.__class__.__name__
+        pre = "("
+        for a, dflt in (('Kp', 0), ('Ki', 0), ('Kd', 0)):
+            v = getattr(self, a)
+            if v != dflt:
+                s += f"{pre}{a}={v!r}"
+                pre = ", "
+        return s + ")"
+
 
 #
 # A PIDPlus is a PID that supports "modifiers" (PIDModification subclasses)
@@ -162,6 +171,9 @@ class PIDPlus(PID):
         # Must be after establishing modifiers, because of PIDHookInitial..
         # event that will be triggered in initial_conditions()
         super().__init__(*args, **kwargs)
+
+        # let each modifier know it has been attached to this pid
+        PIDHookAttached(pid=self).notify(self.modifiers)
 
     def initial_conditions(self, *args, **kwargs):
         super().initial_conditions(*args, **kwargs)
@@ -230,6 +242,21 @@ class PIDPlus(PID):
         # Whatever 'u' came through all that ... that's the result!
         return cx.u
 
+    def __repr__(self):
+        s = super().__repr__()
+        if self.modifiers:
+            # turn 'PID()' into 'PID('
+            # turn 'PID(anything)' into 'PID(anything, )'
+            s = s[:-1]
+            if s[-1] != '(':
+                s += ', '
+            premod = "modifiers="
+            for m in self.modifiers:
+                s += f"{premod}{m}"
+                premod = ", "
+            s += ")"
+        return s
+
 
 # PIDModifier/PIDHook system.
 #
@@ -273,7 +300,6 @@ class PIDPlus(PID):
 # for example, the PIDHistory modifier simply receives all events and
 # creates a record of them for analysis/debug.
 #
-
 
 # ----------------------------
 # PIDHookEvent class hierarchy.
@@ -426,6 +452,10 @@ class _PIDHookEvent:
 # Conceptually the NOTIFYHANDLER could have been programmatically
 # determined from the subclass name, but "explicit is better" won out here.
 
+class PIDHookAttached(_PIDHookEvent):
+    NOTIFYHANDLER = 'PH_attached'
+
+
 class PIDHookInitialConditions(_PIDHookEvent):
     NOTIFYHANDLER = 'PH_initial_conditions'
     DEFAULTED_VARS = dict(setpoint=None)
@@ -472,6 +502,17 @@ class PIDModifier:
         """Default (no-op) handler for unhandled event types"""
         pass
 
+    # Subclasses that want to limit themselves to being attached to
+    # exactly one PIDPlus controller can put this line in their class body:
+    #      PH_attached = PIDModifier._pid_limit_1
+    # or, alternatively, invoke this within their own PH_attached handler.
+    def _pid_limit_1(self, event):
+        try:
+            if self.__attached_to != event.pid:
+                raise TypeError("multiple attachment attempted")
+        except AttributeError:
+            self.__attached_to = event.pid
+
 
 class PIDHistory(PIDModifier):
     """Adds a look-back record of control computations to a PID."""
@@ -511,6 +552,9 @@ class I_Windup(PIDModifier):
 
 class I_SetpointReset(PIDModifier):
     """Reset integration, with optional pause, when setpoint changes."""
+
+    # This is a stateful modifier and cannot be shared among PIDs
+    PH_attached = PIDModifier._pid_limit_1
 
     def __init__(self, secs, *args, **kwargs):
         """Resets integration on setpoint change, and pause it 'secs'.
@@ -556,65 +600,85 @@ class SetpointRamp(PIDModifier):
 
     def __init__(self, secs, *args, **kwargs):
         """Smooth (i.e., ramp) setpoint changes over 'secs' seconds."""
-        super().__init__(*args, **kwargs)
-        if secs < 0:
+        if secs < 0:                # NOTE: secs is allowed to be zero
             raise ValueError(f"ramp time (={secs}) must not be negative")
 
-        # allow zero secs to make life simpler for callers (if ramp time
-        # is tweakable, avoid making zero a special case).
-        self.ramptime = secs
-        self._initialize_state(0)
+        super().__init__(*args, **kwargs)
+        self._ramptime = secs
+        self._noramp(setpoint=0)
 
-    def PH_initial_conditions(self, event):
-        # If the setpoint is unchanged (carried forward) it is None...
-        sp = event.pid.setpoint if event.setpoint is None else event.setpoint
-        self._initialize_state(sp)
-
-    def _initialize_state(self, setpoint):
+    def _noramp(self, /, *, setpoint):
         self._start_sp = setpoint    # starting setpoint
         self._target_sp = setpoint   # ending setpoint
         self._countdown = 0          # time remaining in ramp
 
+    # record the pid because will need it for reaching .setpoint
+    # and also enforce one PIDPlus per SetpointRamp (because stateful)
+    def PH_attached(self, event):
+        self._pid_limit_1(event)
+        self.pid = event.pid
+
+    @property
+    def secs(self):
+        return self._ramptime
+
+    @secs.setter
+    def secs(self, v):
+        self._ramptime = v
+        try:
+            midramp = self.pid.setpoint != self._target_sp
+        except AttributeError:         # not attached yet
+            midramp = False
+
+        if midramp:
+            # This arbitrarily defines the semantic of a mid-ramp secs change
+            # to mean: continue whatever ramping remains, with that remaining
+            # ramp spread out over the new secs
+            self._start_sp = self.pid.setpoint   # i.e., ramp starts HERE ...
+            self._countdown = v                  # ... NOW
+
+            # but if it's been set to zero, just go there RIGHT NOW
+            if v == 0:
+                self.__set_real_setpoint(self._target_sp)
+
+    def __repr__(self):
+        return f"{self.__class__.__name__}({self.secs})"
+
+    def PH_initial_conditions(self, event):
+        # If the setpoint is unchanged (carried forward) it is None...
+        sp = event.pid.setpoint if event.setpoint is None else event.setpoint
+        self._noramp(setpoint=sp)
+
     def PH_setpoint_change(self, event):
         # NO-OP conditions: ramp parameter zero, or no change in sp
-        if self.ramptime == 0 or event.sp_set == self._target_sp:
+        if self._ramptime == 0 or event.sp_set == self._target_sp:
             return
 
         self._start_sp = event.sp_prev
         self._target_sp = event.sp_set
-        self._countdown = self.ramptime
+        self._countdown = self._ramptime
         clampf = min if self._start_sp < self._target_sp else max
         self._clamper = lambda x: clampf(x, self._target_sp)
 
-    # this is a hack so that when the ramp logic needs to set the setpoint,
-    # doing so doesn't trigger ANOTHER ramping and infinite regress
-    @contextmanager
-    def _bypass_ramping(self):
-        saved_sphandler = self.PH_setpoint_change
-        self.PH_setpoint_change = lambda x: None    # i.e., a no-op
+    def __set_real_setpoint(self, v):
         try:
-            yield
+            saved_ramp, self._ramptime = self._ramptime, 0
+            self.pid.setpoint = v
         finally:
-            self.PH_setpoint_change = saved_sphandler
+            self._ramptime = saved_ramp
 
     def PH_precalc(self, event):
-        if self._countdown == 0:       # not currently ramping
-            return
-
-        self._countdown -= event.pid.dt
-
-        if self._countdown < 0:
-            # Done ramping; slam to _target_sp (in case of any floating fuzz)
+        if self._countdown <= event.pid.dt:
+            # Done ramping; slam to _target_sp in case of any floating fuzz.
+            self.__set_real_setpoint(self._target_sp)
             self._countdown = 0
-            with self._bypass_ramping():
-                event.pid.setpoint = self._target_sp
         else:
             # Still ramping ...
-            pcttime = (self.ramptime - self._countdown) / self.ramptime
+            self._countdown -= event.pid.dt
+            pcttime = (self._ramptime - self._countdown) / self._ramptime
             totaldelta = (self._target_sp - self._start_sp)
             ramped = self._clamper(self._start_sp + (totaldelta * pcttime))
-            with self._bypass_ramping():
-                event.pid.setpoint = ramped
+            self.__set_real_setpoint(ramped)
 
 
 #
@@ -678,6 +742,8 @@ class BangBang(PIDModifier):
 
 class D_DeltaE(PIDModifier):
     """Make D term use delta-e rather than delta-pv."""
+
+    PH_attached = PIDModifier._pid_limit_1
 
     def __init__(self, /, *, kickfilter=False):
         """Modifier: Make D term use delta-e rather than delta-pv.
@@ -875,6 +941,45 @@ if __name__ == "__main__":
             u = p.pid(0, dt=dt)
             self.assertEqual(p.setpoint, setpoint * 2)
 
+        def test_spramp2(self):
+            # test that fussing with the secs parameter midramp works
+            ramper = SetpointRamp(4)
+            p = PIDPlus(Kp=1, modifiers=ramper)
+            p.initial_conditions(pv=0, setpoint=0)
+            p.setpoint = 100
+
+            # in two 1-second intervals it should get halfway there
+            p.pid(0, dt=1)
+            p.pid(0, dt=1)
+            self.assertTrue(math.isclose(p.setpoint, 50))
+
+            # now if change secs to 5, should go by 10 more each time...
+            ramper.secs = 5
+            for i in range(5):
+                p.pid(0, dt=1)
+                expected = 50 + ((i + 1) * 10)
+                with self.subTest(sp=p.setpoint, i=i):
+                    self.assertTrue(math.isclose(p.setpoint, expected))
+
+        def test_spramp3(self):
+            # test that fussing with the secs parameter midramp works
+            # but in this case testing "aborting the ramp" by setting secs=0
+            ramper = SetpointRamp(4)
+            p = PIDPlus(Kp=1, modifiers=ramper)
+            p.initial_conditions(pv=0, setpoint=0)
+            p.setpoint = 100
+
+            # in two 1-second intervals it should get halfway there
+            p.pid(0, dt=1)
+            p.pid(0, dt=1)
+            self.assertTrue(math.isclose(p.setpoint, 50))
+
+            # now if change secs to 0, should ramp immediately to target
+            ramper.secs = 0
+            p.pid(0, dt=1)
+            with self.subTest(sp=p.setpoint):
+                self.assertTrue(math.isclose(p.setpoint, 100))
+
         def test_windup(self):
             windup_limit = 2.25
             dt = 0.1
@@ -1009,6 +1114,10 @@ if __name__ == "__main__":
             class Count(PIDModifier):
                 count = 0
 
+                # just to filter this one out of the PH_default count
+                def PH_attached(self, event):
+                    self.pid = event.pid     # implicitly testing this attach
+
                 def PH_default(self, event):
                     self.count += 1
 
@@ -1022,5 +1131,29 @@ if __name__ == "__main__":
             # should have seen and c2 should not have seen.
             self.assertEqual(c1.count, 1)
             self.assertEqual(c2.count, 0)
+
+            # implicitly test that the attach worked for c1 but
+            # was stopped for c2 (hah)
+            self.assertEqual(c1.pid, z)
+            self.assertFalse(hasattr(c2, 'pid'))
+
+        def test_oneattach(self):
+            class AttachToJustOne(PIDModifier):
+                def PH_attached(self, event):
+                    try:
+                        if self.__attached_to != event.pid:
+                            raise TypeError("multiple attachment attempted")
+                    except AttributeError:
+                        self.__attached_to = event.pid
+
+            j1 = AttachToJustOne()
+            z1 = PIDPlus(Kp=1, modifiers=j1)
+            with self.assertRaises(TypeError):
+                z2 = PIDPlus(Kp=1, modifiers=j1)
+
+            # but (at least in this case) it is allowed to be attached
+            # to the same one multiple times
+            jx = AttachToJustOne()
+            _ = PIDPlus(Kp=1, modifiers=[jx, jx])
 
     unittest.main()
