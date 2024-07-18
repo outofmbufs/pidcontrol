@@ -506,12 +506,15 @@ class PIDModifier:
     # exactly one PIDPlus controller can put this line in their class body:
     #      PH_attached = PIDModifier._pid_limit_1
     # or, alternatively, invoke this within their own PH_attached handler.
+    #
+    # NOTE: Using this establishes a .pid attribute, which is available
+    #       for use by the subclass (including, meh, deleting it to reset!)
     def _pid_limit_1(self, event):
         try:
-            if self.__attached_to != event.pid:
+            if self.pid != event.pid:
                 raise TypeError("multiple attachment attempted")
         except AttributeError:
-            self.__attached_to = event.pid
+            self.pid = event.pid
 
 
 class PIDHistory(PIDModifier):
@@ -608,16 +611,16 @@ class SetpointRamp(PIDModifier):
         self._noramp(setpoint=0)
 
     def _noramp(self, /, *, setpoint):
+        """Returns state to 'no ramp in progress'."""
         self._start_sp = setpoint    # starting setpoint
         self._target_sp = setpoint   # ending setpoint
         self._countdown = 0          # time remaining in ramp
 
-    # record the pid because will need it for reaching .setpoint
-    # and also enforce one PIDPlus per SetpointRamp (because stateful)
-    def PH_attached(self, event):
-        self._pid_limit_1(event)
-        self.pid = event.pid
+    # Enforce one PIDPlus per SetpointRamp (because stateful)
+    # NOTE: This also establishes the .pid attribute (at attach time)
+    PH_attached = PIDModifier._pid_limit_1
 
+    # property because if it changes the ramping may have to be adjusted
     @property
     def secs(self):
         return self._ramptime
@@ -644,6 +647,8 @@ class SetpointRamp(PIDModifier):
     def __repr__(self):
         return f"{self.__class__.__name__}({self.secs})"
 
+    # If the setpoint gets changed via an initial_conditions method
+    # then it happens immediately (no ramping).
     def PH_initial_conditions(self, event):
         # If the setpoint is unchanged (carried forward) it is None...
         sp = event.pid.setpoint if event.setpoint is None else event.setpoint
@@ -661,6 +666,12 @@ class SetpointRamp(PIDModifier):
         self._clamper = lambda x: clampf(x, self._target_sp)
 
     def __set_real_setpoint(self, v):
+        """Set the real setpoint in the underlying pid, bypasing ramping."""
+
+        # This try/finally block is necessary because there could be OTHER
+        # modifiers with PH_setpoint_change handlers, so anything in terms
+        # of exceptions is possible. Of course, things are probably woefully
+        # awry if that happens, but, try to maintain sanity here anyway.
         try:
             saved_ramp, self._ramptime = self._ramptime, 0
             self.pid.setpoint = v
@@ -668,12 +679,26 @@ class SetpointRamp(PIDModifier):
             self._ramptime = saved_ramp
 
     def PH_precalc(self, event):
+        # optimize the common case of no ramping in progress
+        if self._countdown == 0:
+            return
+
+        # Test if the dt is the same or larger than the remaining ramp.
+        # DO NOT test for _countdown reaching exactly zero because of
+        # floating point fuzziness; this test works correctly if the countdown
+        # is slightly "ahead" (i.e., slightly too small). If the fuzziness is
+        # the other way (countdown slightly larger than correct) then this
+        # tick gets the setpoint to 99.x% of the final value and there will
+        # be one extra tick for the rest. No one cares; this is good enough.
         if self._countdown <= event.pid.dt:
-            # Done ramping; slam to _target_sp in case of any floating fuzz.
+            # last tick; slam to _target_sp in case of any floating fuzz.
             self.__set_real_setpoint(self._target_sp)
             self._countdown = 0
         else:
-            # Still ramping ...
+            # Still ramping ... This is the normal ramping case but could
+            # potentially also be the "one extra" tick mentioned above
+            # in which case pcttime will be very very close to 1.00 and
+            # the next tick after this will trigger the above branch
             self._countdown -= event.pid.dt
             pcttime = (self._ramptime - self._countdown) / self._ramptime
             totaldelta = (self._target_sp - self._start_sp)
@@ -979,6 +1004,13 @@ if __name__ == "__main__":
             p.pid(0, dt=1)
             with self.subTest(sp=p.setpoint):
                 self.assertTrue(math.isclose(p.setpoint, 100))
+
+        def test_sprampmonogamous(self):
+            # this is really a test of _pid_limit_1 but hey, why not.
+            ramper = SetpointRamp(17)
+            z1 = PIDPlus(Kp=1, modifiers=ramper)
+            with self.assertRaises(TypeError):
+                _ = PIDPlus(Kp=2, modifiers=ramper)
 
         def test_windup(self):
             windup_limit = 2.25
