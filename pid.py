@@ -541,16 +541,22 @@ class I_Windup(PIDModifier):
 
     def __init__(self, w, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        """The integration value will be held to [-w, w] range."""
-        if w < 0:
-            raise ValueError(f"windup ({w=}) must not be negative.")
-        self.w = w
+        """The integration value will be held to [-w, w] range.
+
+        OPTIONALLY: if w is a tuple, then the integration value
+                    will be held to [a, b] range where:
+                       a, b = sorted(w)
+        """
+        try:
+            a, b = sorted(w)
+        except TypeError:
+            a, b = -abs(w), abs(w)    # prevent negative shenanigans
+        self.w0 = a
+        self.w1 = b
 
     def PH_midcalc(self, event):
-        # windup limiting to range [-self.w , self.w]
-        if self.w:
-            clamped = max(-self.w, min(event.pid.integration, self.w))
-            event.i = event.pid.integration = clamped
+        clamped = max(self.w0, min(event.pid.integration, self.w1))
+        event.i = event.pid.integration = clamped
 
 
 class I_SetpointReset(PIDModifier):
@@ -768,6 +774,7 @@ class BangBang(PIDModifier):
 class D_DeltaE(PIDModifier):
     """Make D term use delta-e rather than delta-pv."""
 
+    # can't re-use on multiple because track previous_e here
     PH_attached = PIDModifier._pid_limit_1
 
     def __init__(self, /, *, kickfilter=False):
@@ -810,6 +817,7 @@ class D_DeltaE(PIDModifier):
 if __name__ == "__main__":
     import unittest
     import math
+    from collections import Counter
 
     class TestMethods(unittest.TestCase):
         def test_simple(self):
@@ -1036,6 +1044,36 @@ if __name__ == "__main__":
             else:
                 raise ValueError(f"{i=}, {u2=}")
 
+        def test_windup2(self):
+            # like test_windup but asymmetric limits
+            wlo = 1.0
+            whi = 2.25
+            windup_limits = [whi, wlo]   # deliberately "backwards"
+            dt = 0.1
+            p = PIDPlus(Ki=1, modifiers=I_Windup(windup_limits))
+            p.initial_conditions(pv=0, setpoint=1)
+            for i in range(int(whi / dt) + 1):
+                p.pid(0, dt=dt)
+            self.assertEqual(p.integration, whi)
+            # whatever the u value is now, it should stay here as there
+            # can be no more integration.
+            u = p.pid(0, dt=dt)
+            for i in range(10):
+                self.assertEqual(p.pid(0, dt=dt), u)
+
+            # it should start decreasing immediately if pv goes high
+            # but it should not get below wlo
+            for i in range(int(whi / dt) + 1):
+                u2 = p.pid(2, dt=dt)
+                self.assertTrue(u2 < u)
+                if u2 < wlo:
+                    raise ValueError(f"{i=}, {u2=}")
+                elif u2 == wlo:
+                    print("\n", i)
+                    break
+            else:
+                raise ValueError(f"never got down to {wlo}")
+
         def test_readonlyvars(self):
             class Foo(PIDModifier):
                 def PH_midcalc(self, event):
@@ -1187,5 +1225,65 @@ if __name__ == "__main__":
             # to the same one multiple times
             jx = AttachToJustOne()
             _ = PIDPlus(Kp=1, modifiers=[jx, jx])
+
+        def test_notifications(self):
+            class NotificationChecker(PIDModifier):
+                def __init__(self, *args, **kwargs):
+                    super().__init__(*args, **kwargs)
+                    self.notifications = Counter()
+
+                def _gotevent(self, event):
+                    self.notifications[event.NOTIFYHANDLER] += 1
+
+                def PH_default(self, event):
+                    raise TypeError("DEFAULT HANDLER INVOKED")
+
+            class Stopper(PIDModifier):
+                def PH_default(self, event):
+                    raise HookStop
+
+            # arguably working way too hard at DRY; make all the counters
+            # (handlers) by dynamically discovering NOTIFYHANDLER names
+            def _all_notification_method_names(cls):
+                for subcls in cls.__subclasses__():
+                    yield from _all_notification_method_names(subcls)
+                    try:
+                        yield subcls.NOTIFYHANDLER
+                    except AttributeError:     # base class; possibly others
+                        pass
+
+            METHODNAMES = set(_all_notification_method_names(_PIDHookEvent))
+            for _ in METHODNAMES:
+                setattr(NotificationChecker, _, NotificationChecker._gotevent)
+
+            # so the idea of this test is to make a PID controller with
+            # several copies of the above notification count modifier, with
+            # the last one preceded by a HookStop emitter. Then put this
+            # mess through operations known/expected to result in
+            # every METHODNAMES entry being called exactly once. Of course
+            # the last nchk will have zero counts; the rest should have 1
+            # for every possible NOTIFYHANDLER name.
+
+            nchks = [NotificationChecker() for i in range(3)]
+            stopper = Stopper()
+            last = NotificationChecker()
+            nchks += [stopper, last]
+
+            z = PIDPlus(Kp=1, modifiers=nchks)
+            z.setpoint = 17
+            z.pid(0, dt=.01)
+            expected = 1
+            for i, nchk in enumerate(nchks):
+                if nchk is stopper:
+                    with self.subTest(m=m, note="LAST"):
+                        self.assertEqual(last.notifications[m], 0)
+                    expected = 0
+                else:
+                    for m in METHODNAMES:
+                        with self.subTest(m=m, i=i):
+                            self.assertEqual(nchk.notifications[m], expected)
+                    for v in nchk.notifications:
+                        with self.subTest(v=v):
+                            self.assertTrue(v in METHODNAMES)
 
     unittest.main()
