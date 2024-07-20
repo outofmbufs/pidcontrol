@@ -281,16 +281,16 @@ A PIDModifier can also define a catch-all handler, called `PH_default` . It rece
 
         # this _default method gets all events and stores them
         def PH_default(self, event):
-            self.history.append(event.clone())
+            self.history.append(copy.copy(event))
 
-This works by creating a deque (from collections) in the PIDHistory object, and simply entering every event (caught by `PH_default`) into it. (It uses .clone() to enter a copy of the event, to capture it at the state it was in this position in the modification/notify list). Refer back to the PIDHistory example given in the `PIDPlus` discussion to see how this would be used.
+This works by creating a deque (from collections) in the PIDHistory object, and simply entering (a copy of) every event (caught by `PH_default`) into it. The reason for copying the event is because modifiers further down the chain can alter `event` values. For the purpose of the history modifier the desired semantic is to record the values at the time they were seen by the history module; hence the event is copied.
 
 As will be described next, each event contains its own set of attributes specific to that event. Some of the attributes are read-only, emphasizing that changing them will have no effect on the PIDPlus operation. Others are read-write and changing them will have event-specific semantics as discussed with each event below.
 
 The specific events, and associated semantics, for each PIDHook event are:
 
 **PIDHookAttached**:
-Event is generated at the very end of PIDPlus initialization, so the unerlying PIDPlus object is "ready to go" when this notification is received. See "Shared Modifiers" discussion for one way to use this event.
+Event is generated at the very end of PIDPlus initialization, so the underlying PIDPlus object is "ready to go" when this notification is received. See "Shared Modifiers" discussion for one way to use this event.
 
 READ-ONLY ATTRIBUTES:
 - `pid` -- the PIDPlus object
