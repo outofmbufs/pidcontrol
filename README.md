@@ -80,9 +80,9 @@ See pidexample.py for an example. Try running it like this:
 
 ## PID Algorithm Addons: PIDPlus class
 
-The simple PID algorithm works well enough in most cases, but sometimes modifications are needed to achieve adequate control. The class `PIDPlus` provides several such enhancements and a framework for adding more.
+The simple PID algorithm works well enough in most use cases. For others, the class `PIDPlus` provides several customizations (called "modifiers") and a framework for adding more.
 
-The following features are available as `PIDPlus` "modifiers":
+The following features are available as `PIDPlus` modifiers:
 
 - **Setpoint Ramping**: Any time *object*.setpoint is changed, instead of the change taking effect immediately it will be ramped-in over a configurable time period. In applications where the setpoint does indeed change midstream, this may be useful in reducing or eliminating abrupt control change behavior (especially overshoot).
 
@@ -129,11 +129,23 @@ Example usage - to cause all modifications of z.setpoint to be ramped in over a 
 
 and m must (of course) be given to PIDPlus in the modifiers list.
 
+It is possible to change the ramp time in an active controller by changing the `secs` attribute:
+
+    m.secs = 2.5
+
+would change the ramp time to 2.5 seconds. If a ramping is already in progress when this is done, a new ramp is calculated from the then-current (partly-ramped) setpoint to the already-established target, at a rate dictated by the new ramp time. If the new ramp time is zero, the setpoint is immediately changed to that target.
+
 ### Windup Protection
 
 To limit the (unweighted!) integration term to +/- x:
 
     m = I_Windup(x)
+
+To limit the (unweighted!) integration term to a closed asymmetric range [lo, hi]:
+
+    m = I_Windup((lo, hi))         # NOTE: one tuple arg, not two args
+
+Note that the order in the tuple does not matter; the lower value will be the low limit and the higher value will be the high limit.
 
 ### Integration reset and delay on setpoint change
 
@@ -212,11 +224,20 @@ Note that the order of the modifiers in that list is significant: they will be a
     
     p = PIDPlus(Kp=foo, Ki=bar, Kd=baz, modifiers=[h1, ramp, windup, h2])
 
-In this example, h1.history would have the records from BEFORE the ramp and windup handlers ran; h2.history would have the records from AFTER. Instantiating a PIDPlus with multiple objects of other modifiers (e.g., SetpointRamp) is not generally useful (and the exact behavior may be implementation-dependent).
+In this example, h1.history would have the records from BEFORE the ramp and windup handlers ran; h2.history would have the records from AFTER. Instantiating a PIDPlus with multiple objects of other modifiers (e.g., two SetpointRamp modifiers) is not generally useful (and the exact behavior may be implementation-dependent).
+
+## No Modifiers
+Of course a `PIDPlus` can be used with no modifiers:
+
+    p = PIDPlus(Kp=foo, Ki=bar, Kd=baz)
+
+This is perfectly acceptable, it just runs slower than a `PID` does. Performance testing on a typical laptop shows the `pid` method in a `PID` object taking about 0.3 usec per call. The same with `PIDPlus` takes about 11 usec per call (roughly 36 times slower).
 
 ## Writing a PIDModifier
 
-A custom PIDModifier interacts with one or more PIDHookEvent notifications by providing a handler method for that notification. There are 5 PIDHookEvent types, each with a specific notification method name as noted here:
+A custom PIDModifier interacts with one or more PIDHookEvent notifications by providing a handler method for that notification. There are 6 PIDHookEvent types, each with a specific notification method name as noted here:
+
+- PIDHookAttached: generated at the **end** of PIDPlus.__init__ for each modifier attached to that PIDPlus. PIDModifier method name: `PH_attached` . The significance of this being "at the end of" PIDPlus.__init__ is that the PIDPlus will be fully-initialized when this notification happens.
 
 - PIDHookInitialConditions: generated when the 'initial_conditions()' method is invoked on a PIDPlus object. PIDModifier method name: `PH_initial_conditions` .
 
@@ -267,6 +288,12 @@ This works by creating a deque (from collections) in the PIDHistory object, and 
 As will be described next, each event contains its own set of attributes specific to that event. Some of the attributes are read-only, emphasizing that changing them will have no effect on the PIDPlus operation. Others are read-write and changing them will have event-specific semantics as discussed with each event below.
 
 The specific events, and associated semantics, for each PIDHook event are:
+
+**PIDHookAttached**:
+Event is generated at the very end of PIDPlus initialization, so the unerlying PIDPlus object is "ready to go" when this notification is received. See "Shared Modifiers" discussion for one way to use this event.
+
+READ-ONLY ATTRIBUTES:
+- `pid` -- the PIDPlus object
 
 **PIDHookInitialConditions**:
 Event is generated AFTER the `initial_conditions()` method has completed modifying the PIDPlus object. The intent of this event is to allow PIDModifier implementations a hook for (re)initializing their own state if the application uses the `initial_conditions` method to change pv and/or the setpoint.
@@ -376,4 +403,19 @@ READ-ONLY ATTRIBUTES:
 - `p` -- for reference: the (unweighted) proportional term value. NEVER None.
 - `i` -- for reference: the (unweighted) integral term value. NEVER None.
 - `d` -- for reference: the (unweighted) derivative term value. NEVER None.
+
+## Shared Modifiers
+Some modifiers can be meaningfully shared among multiple PIDPlus controllers, because they have no implicit/internal state. An good example is `I_Windup` which simply performs a (stateless) calculation on the integration value it is supplied via a notification event.
+
+Some modifiers have state but still can be meaningfully shared; a good example is the PIDHistory modifier. If a single PIDHistory is attached to multiple PIDPlus control objects, the history will contain an interwoven list of events (each which will have the .pid attribute to disambiguate which controller it came from).
+
+Some modifiers cannot be meaningfully shared because they have controller-specific internal state. The SetpointRamp modifier is a good example of this. Such modifiers should generally be coded to raise an exception if sharing is attempted. The `PH_attached` notification can be used for this; here is a trivial example that is a no-op but does not allow itself to be attached more than once:
+
+    class AttachToJustOne(PIDModifier):
+        def PH_attached(self, event):
+            try:
+                if self.__attached_to != event.pid:
+                    raise TypeError("multiple attachment attempted")
+            except AttributeError:
+                self.__attached_to = event.pid
 
