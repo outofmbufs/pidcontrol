@@ -65,7 +65,7 @@ class PID:
 
         self.last_pid = (0, 0, 0)
 
-    def pid(self, pv, /, *, dt=None):
+    def pid(self, pv, dt=None):
         """Return the new commanded control value for the most recent pv/dt.
 
         If dt is omitted the previous dt will be re-used.
@@ -158,22 +158,23 @@ class PIDPlus(PID):
                              setpoint ramping, etc.
         """
 
-        # force the mods to be a sequence, possibly zero length
-        # Note: the arg can be a naked PIDModifier if only one is being used
-        #       (force that into a tuple of length 1)
         if modifiers is None:
-            self.modifiers = tuple()
-        elif isinstance(modifiers, PIDModifier):
-            self.modifiers = (modifiers,)
+            self.modifiers = tuple()    # degenerate case; essentially PID()
         else:
-            self.modifiers = modifiers
+            # force modifiers to be a sequence (tuple), possibly zero length.
+            # Note: modifiers can be a naked PIDModifier which is auto
+            #       converted into a tuple of length 1.
+            try:
+                self.modifiers = tuple(modifiers)
+            except TypeError:
+                self.modifiers = (modifiers,)
+
+        # let each modifier know it has been attached to this pid
+        PIDHookAttached(pid=self).notify(self.modifiers)
 
         # Must be after establishing modifiers, because of PIDHookInitial..
         # event that will be triggered in initial_conditions()
         super().__init__(*args, **kwargs)
-
-        # let each modifier know it has been attached to this pid
-        PIDHookAttached(pid=self).notify(self.modifiers)
 
     def initial_conditions(self, *args, **kwargs):
         super().initial_conditions(*args, **kwargs)
@@ -313,7 +314,11 @@ class _PIDHookEvent:
 
     # Subclasses MUST put attribute names in here for attributes
     # that are writable (all other attributes will be read-only)
+    # NOTE: '*' means all variables RW, but see STAR_READONLY too.
     RW_VARS = set()
+
+    # these attributes are read-only even if '*' used in RW_VARS
+    STAR_READONLY = {'pid'}
 
     # Property/descriptor implementing read-only-ness
     class _ReadOnlyDescr:
@@ -394,14 +399,12 @@ class _PIDHookEvent:
 
     def __init__(self, /, **kwargs):
         for k, v in ChainMap(kwargs, self.DEFAULTED_VARS).items():
-            if self.__readonly(k):
+            readonly = (k in self.STAR_READONLY if '*' in self.RW_VARS
+                        else k not in self.RW_VARS)
+            if readonly:
                 self._ReadOnlyDescr.establish_property(k, v, obj=self)
             else:
                 setattr(self, k, v)
-
-    def __readonly(self, k):
-        # the 'pid' field is always readonly even in the '*' case
-        return k == 'pid' or (self.RW_VARS != '*' and k not in self.RW_VARS)
 
     def notify(self, modifiers):
         """Invoke the notification handler for all modifiers.
