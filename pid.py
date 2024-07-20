@@ -1069,7 +1069,6 @@ if __name__ == "__main__":
                 if u2 < wlo:
                     raise ValueError(f"{i=}, {u2=}")
                 elif u2 == wlo:
-                    print("\n", i)
                     break
             else:
                 raise ValueError(f"never got down to {wlo}")
