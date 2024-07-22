@@ -22,7 +22,6 @@
 
 import copy
 from collections import deque, ChainMap
-from itertools import filterfalse
 
 
 class PID:
@@ -34,12 +33,9 @@ class PID:
         Kp, Ki, Kd        -- weights for P/I/D control signals
         """
 
-        # P/I/D weighting parameters. Note: they can't all be zero.
         self.Kp = Kp
         self.Ki = Ki
         self.Kd = Kd
-        if (self.Kp, self.Ki, self.Kd) == (0, 0, 0):
-            raise ValueError("Kp/Ki/Kd must not all be zero")
 
         # if different initial conditions are desired, callers should
         # call initial_conditions themselves after this initialization.
@@ -425,6 +421,8 @@ class _PIDHookEvent:
             # sending this to further modifiers coming after it.
             except HookStop:
                 break
+            except AttributeError:
+                raise ValueError(f"Cannot attach modifier '{m}'") from None
 
         return self            # notational convenience
 
@@ -454,6 +452,13 @@ class _PIDHookEvent:
 #
 # Conceptually the NOTIFYHANDLER could have been programmatically
 # determined from the subclass name, but "explicit is better" won out here.
+#
+# The "DEFAULTED_VARS" is an alternate way to implement what would otherwise
+# be an __init()__ in each subclass with a custom signature and super() call
+# for *args/**kwargs. Subclasses can still do it that way if desired; but the
+# DEFAULTED_VARS mechanism makes trivial cases trivial and avoids boilerplate
+# like: "super().__init__(*args, arg1=arg1, arg2=arg2, ... **kwargs)"
+#
 
 class PIDHookAttached(_PIDHookEvent):
     NOTIFYHANDLER = 'PH_attached'
@@ -515,7 +520,7 @@ class PIDModifier:
     def _pid_limit_1(self, event):
         try:
             if self.pid != event.pid:
-                raise TypeError("multiple attachment attempted")
+                raise TypeError(f"multiple attachment attempted: '{self}'")
         except AttributeError:
             self.pid = event.pid
 
