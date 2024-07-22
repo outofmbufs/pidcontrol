@@ -135,6 +135,8 @@ It is possible to change the ramp time in an active controller by changing the `
 
 would change the ramp time to 2.5 seconds. If a ramping is already in progress when this is done, a new ramp is calculated from the then-current (partly-ramped) setpoint to the already-established target, at a rate dictated by the new ramp time. If the new ramp time is zero, the setpoint is immediately changed to that target.
 
+NOTE that the ramp time is defined in terms of `pid()` calls and the `dt` argument. In other words, "1.5 seconds" doesn't mean, necessarily, 1.5 seconds of real time. It means *over a series of `pid()` calls until the sum of the `dt` values provided in those calls reaches or exceeds 1.5*.
+
 ### Windup Protection
 
 To limit the (unweighted!) integration term to +/- x:
