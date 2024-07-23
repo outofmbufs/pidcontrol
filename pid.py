@@ -41,14 +41,13 @@ class PID:
         # call initial_conditions themselves after this initialization.
         self.initial_conditions(pv=0, setpoint=0)
 
-    # the advantage of calling this, rather than bashing pv and setpoint
-    # directly, is that this will also reset various state variables
-    # and avoid any "kick" from the instantaneous pv/setpoint changes.
-    # This becomes even more important in PIDPlus where other features
-    # will also need resetting (e.g., setpoint ramping).
-    #
     def initial_conditions(self, /, *, pv=None, setpoint=None):
-        """Establish initial conditions -- resets state accordingly."""
+        """Establish initial conditions -- resets state accordingly.
+
+        Use this rather than bashing .pv and .setpoint directly, because
+        this will also reset relevant state variables and will avoid
+        any "kick" from instantaneous pv/setpoint changes.
+        """
 
         self.dt = 0          # corresponding dt (between pid() calls)
         if setpoint is not None:
@@ -68,7 +67,7 @@ class PID:
         NOTE: Calling this with a zero dt will fail w/ZeroDivisionError.
               Startup sequence should be something like:
                   z = PID(Kp=foo, Ki=bar, Kd=baz)
-                  z.pv = current process value    # this line is optional
+                  z.initial_conditions(pv=xxx, setpoint=sss)
                   (optionally) wait dt seconds    # ok to not wait first time
                   u = z.pid(newpv, dt)
         """
@@ -127,8 +126,10 @@ class PID:
     def __repr__(self):
         s = self.__class__.__name__
         pre = "("
+        # NOTE: If __repr__ requested in PIDHookAttached processing, it
+        #       is before Kp/etc exist. That's why 'dflt' is in getattr()
         for a, dflt in (('Kp', 0), ('Ki', 0), ('Kd', 0)):
-            v = getattr(self, a)
+            v = getattr(self, a, dflt)
             if v != dflt:
                 s += f"{pre}{a}={v!r}"
                 pre = ", "
@@ -136,9 +137,9 @@ class PID:
 
 
 #
-# A PIDPlus is a PID that supports "modifiers" (PIDModification subclasses)
-# which can enhance/alter the base PID calculations and outputs. Modifiers
-# can provide setpoint change ramping; integration windup protection, etc.
+# A PIDPlus is a PID that supports "modifiers" (PIDModifier subclasses).
+# PIDModifiers can enhance/alter the base PID calculations and outputs.
+# They can provide setpoint change ramping; integration windup limits, etc.
 #
 # See PIDHook and PIDModifier class descriptions for details on how
 # the behavior "modifiers" work.
@@ -204,7 +205,7 @@ class PIDPlus(PID):
         self._setpoint = v if event.sp_now is None else event.sp_now
 
     def _calculate(self):
-        """Return Info with the new control variable value."""
+        """Run PIDModifier protocol and return control value ('u')."""
 
         # There are three notification points: Pre/Mid/Post which allow
         # the various PIDModifiers to do their thing.
@@ -242,8 +243,8 @@ class PIDPlus(PID):
     def __repr__(self):
         s = super().__repr__()
         if self.modifiers:
-            # turn 'PID()' into 'PID('
-            # turn 'PID(anything)' into 'PID(anything, )'
+            # turn 'PIDPlus()' into 'PIDPlus('
+            # turn 'PIDPlus(anything)' into 'PIDPlus(anything, )'
             s = s[:-1]
             if s[-1] != '(':
                 s += ', '
@@ -410,20 +411,19 @@ class _PIDHookEvent:
         when the returned event is needed even after the notify()
         """
 
-        for m in modifiers:
+        for nth, m in enumerate(modifiers):
+            h = getattr(m, self.NOTIFYHANDLER, getattr(m, 'PH_default'))
             try:
-                # invoke the NOTIFYHANDLER or the PH_default.
-                # One or the other needs to be present in every modifier.
-                # NOTE: The base PIDModifier defines a (no-op) PH_default.
-                getattr(m, self.NOTIFYHANDLER, getattr(m, 'PH_default'))(self)
-
-            # A modifier can raise HookStop if it wants to abort
-            # sending this to further modifiers coming after it.
+                h(self)        # ... this calls m.PH_foo(event)
             except HookStop:
+                # stop propagating; notify the REST of the modifiers of THAT
+                PIDHookHookStopped(
+                    event=self,        # the event that was HookStop'd
+                    stopper=m,         # whodunit
+                    nth=nth,           # in case more than one 'm'
+                    modifiers=modifiers
+                ).notify(modifiers[nth+1:])
                 break
-            except AttributeError:
-                raise ValueError(f"Cannot attach modifier '{m}'") from None
-
         return self            # notational convenience
 
     def vars(self):
@@ -462,6 +462,10 @@ class _PIDHookEvent:
 
 class PIDHookAttached(_PIDHookEvent):
     NOTIFYHANDLER = 'PH_attached'
+
+
+class PIDHookHookStopped(_PIDHookEvent):
+    NOTIFYHANDLER = 'PH_hookstopped'
 
 
 class PIDHookInitialConditions(_PIDHookEvent):
@@ -1117,6 +1121,23 @@ if __name__ == "__main__":
                 ebozo.pid = 'bonzo'
             self.assertEqual(ebozo.pid, 'bozo')
 
+        def test_attrpropagation(self):
+            # Modifiers can add more attributes during the pre/mid/post
+            # calculation events (that might be a bug?) ... test this.
+            class FooMod(PIDModifier):
+                counter = 0
+
+                def PH_precalc(self, event):
+                    event.foo = self.counter
+                    self.counter += 1
+
+                def PH_postcalc(self, event):
+                    if event.foo != self.counter - 1:
+                        raise ValueError("XXX")
+
+            z = PIDPlus(modifiers=FooMod())
+            z.pid(1, dt=0.01)         # that this doesn't bomb is the test
+
         def test_readme_1(self):
             # just testing an example given in the README.md
             class SetpointPercent(PIDModifier):
@@ -1190,10 +1211,14 @@ if __name__ == "__main__":
 
             class Count(PIDModifier):
                 count = 0
+                hookstops = []
 
                 # just to filter this one out of the PH_default count
                 def PH_attached(self, event):
                     self.pid = event.pid     # implicitly testing this attach
+
+                def PH_hookstopped(self, event):
+                    self.hookstops.append(event)
 
                 def PH_default(self, event):
                     self.count += 1
@@ -1213,6 +1238,10 @@ if __name__ == "__main__":
             # was stopped for c2 (hah)
             self.assertEqual(c1.pid, z)
             self.assertFalse(hasattr(c2, 'pid'))
+
+            # and test that c2 got notified of that hookstop and also
+            # the initial_conditions hookstop
+            self.assertEqual(len(c2.hookstops), 2)
 
         def test_oneattach(self):
             class AttachToJustOne(PIDModifier):
@@ -1242,6 +1271,10 @@ if __name__ == "__main__":
                 def _gotevent(self, event):
                     self.notifications[event.NOTIFYHANDLER] += 1
 
+                # explicitly ignore these
+                def PH_hookstopped(self, event):
+                    pass
+
                 def PH_default(self, event):
                     raise TypeError("DEFAULT HANDLER INVOKED")
 
@@ -1255,13 +1288,18 @@ if __name__ == "__main__":
                 for subcls in cls.__subclasses__():
                     yield from _all_notification_method_names(subcls)
                     try:
-                        yield subcls.NOTIFYHANDLER
+                        if subcls.NOTIFYHANDLER != 'PIDHookHookStopped':
+                            yield subcls.NOTIFYHANDLER
                     except AttributeError:     # base class; possibly others
                         pass
 
             METHODNAMES = set(_all_notification_method_names(_PIDHookEvent))
-            for _ in METHODNAMES:
-                setattr(NotificationChecker, _, NotificationChecker._gotevent)
+            for nm in list(METHODNAMES):    # NOTE: modified within loop
+                if hasattr(NotificationChecker, nm):
+                    METHODNAMES.remove(nm)
+                else:
+                    setattr(
+                        NotificationChecker, nm, NotificationChecker._gotevent)
 
             # so the idea of this test is to make a PID controller with
             # several copies of the above notification count modifier, with
@@ -1292,5 +1330,26 @@ if __name__ == "__main__":
                     for v in nchk.notifications:
                         with self.subTest(v=v):
                             self.assertTrue(v in METHODNAMES)
+
+        def test_hh(self):
+            # a test of HookStop from naughty HookStop handlers
+            class Stopper(PIDModifier):
+                def PH_default(self, event):
+                    foo = event
+                    hh_depth = 0
+                    while isinstance(foo, PIDHookHookStopped):
+                        hh_depth += 1
+                        foo = foo.event
+
+                    try:
+                        self.maxrecursion = max(self.maxrecursion, hh_depth)
+                    except AttributeError:
+                        self.maxrecursion = hh_depth
+                    raise HookStop
+
+            mods = [Stopper() for _ in range(10)]
+            z = PIDPlus(modifiers=mods)
+            for i, m in enumerate(mods):
+                self.assertEqual(i, m.maxrecursion)
 
     unittest.main()
