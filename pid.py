@@ -207,16 +207,29 @@ class PIDPlus(PID):
     def _calculate(self):
         """Run PIDModifier protocol and return control value ('u')."""
 
-        # There are three notification points: Pre/Mid/Post which allow
-        # the various PIDModifiers to do their thing.
+        # There are three notification points
+        #    BaseTerms:
+        #        An opportunity to totally override (prevent) the built-in
+        #        computation of e/p/i/d/u values.
+        #
+        #    ModifyTerms:
+        #        At this point 'e' has been determined (and is not relevant
+        #        to any further built-in calculations) and p/i/d/u values
+        #        have been set either by a BaseTerms event handler or
+        #        the built-in logic. This is an opportunity to further
+        #        modify those now-calculated p/i/d/u values.
+        #
+        #     CalculateU:
+        #        Last opportunity to bash 'u' (only).
+        #
 
-        # -- PRE --
-        # Run all the PreCalc's which may (or may not) establish some
-        # of the process control values (e/p/i/d/u).
-        cx = PIDHookPreCalc(pid=self).notify(self.modifiers)
+        # FIRST PIDHookEvent: BaseTerms
+        # Run all the BaseTerms events which may (or may not) establish
+        # some of the process control values (e/p/i/d/u).
+        cx = PIDHookBaseTerms(pid=self).notify(self.modifiers)
 
-        # -- MID --
-        # Calculate e/p/i/d except if already supplied by a PRE
+        # Anything not supplied by a BaseTerms modifier is calculated
+        # the standard way here:
         if cx.e is None:
             cx.e = self._error()
         for attr, f in (('p', self._proportional),
@@ -225,24 +238,31 @@ class PIDPlus(PID):
             if getattr(cx, attr) is None:
                 setattr(cx, attr, f(cx.e))
 
-        # note the vars from the PreCalc are cloned to the MidCalc
-        cx = PIDHookMidCalc(**cx.vars()).notify(self.modifiers)
+        # NOTE: 'e' is not used further after this point, unless a modifier
+        #       looks at it specifically.
 
-        # -- POST --
-        # Generally 'u' calculation should be overridden in a PostCalc.
-        # See, for example, BangBang. But allow for it in Pre/Mid by
+        # SECOND PIDHookEvent: ModifyTerms
+        # This is where most modifiers do their work, given the "raw"
+        # p/i/d/ values (though they potentially were supplied by
+        # a modifier, not by the normal calculation).
+        cx = PIDHookModifyTerms(**cx.vars()).notify(self.modifiers)
+
+        # Generally 'u' calculation should be overridden in a CalculateU.
+        # See, for example, BangBang. But allow for it in ModifyTerms by
         # testing for it. By far the common case is cx.u is still None here.
         if cx.u is None:
             cx.u = self._u(cx.p, cx.i, cx.d)
 
-        # MidCalcs and PostCalcs can compute 'u' arbitrarily, regardless of
-        # the p/i/d values. This makes last_pid less interesting, but it still
-        # needs to be noted. The p/i/d values themselves are fixed at this
-        # point (i.e., read-only in PostCalc).
+        # At this point p/i/d are fixed (note: read-only in CalculateU).
+        # Record last_pid accordingly. Caution: Because modifiers can
+        # perform arbitrary calculations to provide a 'u' value, the
+        # relevance of last_pid is less clear in a PIDPlus. Nevertheless:
         self.last_pid = (cx.p, cx.i, cx.d)
 
-        # again note the vars from the MidCalc are cloned to the PostCalc
-        cx = PIDHookPostCalc(**cx.vars()).notify(self.modifiers)
+        # THIRD (final) PIDHookEvent: CalculateU
+        # This is where a modifier such as BangBang can do violence to 'u'
+        # Note again: vars from the ModifyTerms are cloned to the CalculateU
+        cx = PIDHookCalculateU(**cx.vars()).notify(self.modifiers)
 
         # Whatever 'u' came through all that ... that's the result!
         return cx.u
@@ -312,16 +332,8 @@ class PIDPlus(PID):
 class _PIDHookEvent:
     """Base class for events that get generated within PIDPlus."""
 
-    # Subclasses can redefine this to supply default attribute values
-    DEFAULTED_VARS = {}
-
-    # Subclasses MUST put attribute names in here for attributes
-    # that are writable (all other attributes will be read-only)
-    # NOTE: '*' means all variables RW, but see STAR_READONLY too.
-    RW_VARS = set()
-
-    # these attributes are read-only even if '*' used in RW_VARS
-    STAR_READONLY = {'pid'}
+    DEFAULTED_VARS = {}       # subclasses will override as appropriate
+    READONLY_VARS = {'*'}     # by default, everything is readonly
 
     @classmethod
     def handlername(cls):
@@ -421,13 +433,32 @@ class _PIDHookEvent:
                 f"attempted deletion of read-only attr '{self._name}'")
 
     def __init__(self, /, **kwargs):
+        # READONLY_VARS has three implicit semantics:
+        #    - None means set()
+        #    - '*' matches everything
+        #    - 'pid' is hardwired as always read-only
+        #
+        try:
+            readonlys = self.__RO
+        except AttributeError:
+            readonlys = self.__ro()
+
         for k, v in ChainMap(kwargs, self.DEFAULTED_VARS).items():
-            readonly = (k in self.STAR_READONLY if '*' in self.RW_VARS
-                        else k not in self.RW_VARS)
-            if readonly:
+            if {k, '*'} & readonlys:
                 self._ReadOnlyDescr.establish_property(k, v, obj=self)
             else:
                 setattr(self, k, v)
+
+    # in effect this is a class-level initialization for the __RO attribute
+    # which combines the semantics of None (shorthand for set()) and
+    # automatically makes 'pid' readonly whether specified or not.
+    @classmethod
+    def __ro(cls):
+        if cls.READONLY_VARS is None:
+            cls.__RO = {'pid'}
+        else:
+            cls.__RO = cls.READONLY_VARS | {'pid'}
+        return cls.__RO
 
     def notify(self, modifiers):
         """Invoke the notification handler for all modifiers.
@@ -465,16 +496,15 @@ class _PIDHookEvent:
         return s + ")"
 
 
-# with the above __init__ and notify as a framework, typically each
-# specific event is simply a subclass with some class variables:
+# The _PIDHookEvent .__init__() and .notify() methods provide a framework so
+# that typically the specific event types are just subclasses with a
+# few class variables:
 #
 #    DEFAULTED_VARS -- dictionary of default attribute names/values that
 #                      will be used (if no explicit values given in init)
-#    RW_VARS        -- names of attributes that are allowed to be read-write.
-#                      The default for any attributes not in RW_VARS is
-#                      to enforce read-only access of them. As a special
-#                      case convenience, RW_VARS can be '*' (the string)
-#                      which will mean make all the attributes read/write
+#    READONLY_VARS  -- set() ... names of attributes that are read-only.
+#                      The default value is {'*'} which means all attributes
+#                      will be read-only. NOTE: 'pid' is hard-wired read-only.
 #
 # The "DEFAULTED_VARS" is an alternate way to implement what would otherwise
 # be an __init()__ in each subclass with a custom signature and super() call
@@ -506,25 +536,24 @@ class PIDHookInitialConditions(_PIDHookEvent):
 
 class PIDHookSetpointChange(_PIDHookEvent):
     DEFAULTED_VARS = dict(sp_now=None)
-    RW_VARS = {'sp_now'}
+    READONLY_VARS = {'sp_prev', 'sp_set'}     # sp_now will be read/write
 
 
-# generic base for PreCalc/Mid/Post. Establishes the event default vars.
+# Base for BaseTerms, ModifyTerms, CalculateU. Establish default vars.
 class _PIDHook_Calc(_PIDHookEvent):
     DEFAULTED_VARS = dict(e=None, p=None, i=None, d=None, u=None)
-    RW_VARS = '*'
 
 
-class PIDHookPreCalc(_PIDHook_Calc):
-    pass
+class PIDHookBaseTerms(_PIDHook_Calc):
+    READONLY_VARS = None
 
 
-class PIDHookMidCalc(_PIDHook_Calc):
-    pass
+class PIDHookModifyTerms(_PIDHook_Calc):
+    READONLY_VARS = {'e'}
 
 
-class PIDHookPostCalc(_PIDHook_Calc):
-    RW_VARS = 'u'         # setting others is a no-op, so prevent that error
+class PIDHookCalculateU(_PIDHook_Calc):
+    READONLY_VARS = {'e', 'p', 'i', 'd'}
 
 
 # Any PIDModifier that wants to stop hook processing raises this:
@@ -597,7 +626,7 @@ class I_Windup(PIDModifier):
         self.w0 = a
         self.w1 = b
 
-    def PH_mid_calc(self, event):
+    def PH_modify_terms(self, event):
         clamped = max(self.w0, min(event.pid.integration, self.w1))
         event.i = event.pid.integration = clamped
 
@@ -628,7 +657,7 @@ class I_SetpointReset(PIDModifier):
     def PH_setpoint_change(self, event):
         self._trigger = True
 
-    def PH_pre_calc(self, event):
+    def PH_base_terms(self, event):
         # When triggered (by a setpoint change):
         #   - Reset the integration. It is as if the controller is
         #     starting over afresh (for integration)
@@ -643,7 +672,12 @@ class I_SetpointReset(PIDModifier):
             event.i = 0
 
         if self.pause_remaining > 0:
-            self.pause_remaining -= event.pid.dt
+            # max() for good housekeeping re: floating fuzz; force neg to 0
+            self.pause_remaining = max(0, self.pause_remaining - event.pid.dt)
+
+            # Supplying .i here supplants _integral() (i.e., prevents it
+            # from being invoked in _calculate). Therefore, this also
+            # (correctly) prevents accumulation in pid.integration
             event.i = 0
 
 
@@ -727,7 +761,7 @@ class SetpointRamp(PIDModifier):
         finally:
             self._ramptime = saved_ramp
 
-    def PH_pre_calc(self, event):
+    def PH_base_terms(self, event):
         # optimize the common case of no ramping in progress
         if self._countdown == 0:
             return
@@ -786,7 +820,7 @@ class BangBang(PIDModifier):
         self.off_value = off_value
         self.dead_value = dead_value
 
-    def PH_post_calc(self, event):
+    def PH_calculate_u(self, event):
         if self.off_threshold is None:    # on_thr.. must not be None
             if event.u >= self.on_threshold:
                 val = self.on_value
@@ -844,8 +878,7 @@ class D_DeltaE(PIDModifier):
         if self.kickfilter:
             self.kickticks = 1
 
-    # done as MidCalc so it doesn't have to (re)compute e itself
-    def PH_mid_calc(self, event):
+    def PH_modify_terms(self, event):
         if self.previous_e is None:     # special case for very first call
             event.d = 0
         elif self.kickticks == 0:
@@ -1117,10 +1150,10 @@ if __name__ == "__main__":
 
         def test_readonlyvars(self):
             class Foo(PIDModifier):
-                def PH_mid_calc(self, event):
+                def PH_modify_terms(self, event):
                     event.d = 17
 
-                def PH_post_calc(self, event):
+                def PH_calculate_u(self, event):
                     if event.d != 17:
                         raise ValueError(f"Got {event.d}")
                     try:
@@ -1137,8 +1170,8 @@ if __name__ == "__main__":
             # tests that the property magic for read-only attrs
             # works properly in the face of multiple hook objects
             # (this was once a bug)
-            e1 = PIDHookPostCalc(pid='bozo', e=1)
-            e2 = PIDHookPostCalc(pid='bonzo', e=2)
+            e1 = PIDHookCalculateU(pid='bozo', e=1)
+            e2 = PIDHookCalculateU(pid='bonzo', e=2)
             self.assertEqual(e1.pid, 'bozo')
             self.assertEqual(e1.e, 1)
             self.assertEqual(e2.pid, 'bonzo')
@@ -1146,7 +1179,7 @@ if __name__ == "__main__":
 
         def test_pidreadonly(self):
             # .pid should be readonly even if RW_VARS was '*'
-            ebozo = PIDHookPreCalc(pid='bozo', e=1)
+            ebozo = PIDHookBaseTerms(pid='bozo', e=1)
             with self.assertRaises(TypeError):
                 ebozo.pid = 'bonzo'
             self.assertEqual(ebozo.pid, 'bozo')
@@ -1157,11 +1190,11 @@ if __name__ == "__main__":
             class FooMod(PIDModifier):
                 counter = 0
 
-                def PH_pre_calc(self, event):
+                def PH_base_terms(self, event):
                     event.foo = self.counter
                     self.counter += 1
 
-                def PH_post_calc(self, event):
+                def PH_calculate_u(self, event):
                     if event.foo != self.counter - 1:
                         raise ValueError("XXX")
 
@@ -1181,7 +1214,7 @@ if __name__ == "__main__":
         def test_readme_2(self):
             # just testing another example fromthe README.md
             class UBash(PIDModifier):
-                def PH_pre_calc(self, event):
+                def PH_base_terms(self, event):
                     event.u = .666
 
             z = PIDPlus(Kp=1, modifiers=UBash())
@@ -1190,7 +1223,7 @@ if __name__ == "__main__":
         def test_readme_3(self):
             # yet another README.md example test
             class SetpointPercent(PIDModifier):
-                def PH_pre_calc(self, event):
+                def PH_base_terms(self, event):
                     event.e = (event.pid.setpoint / 100) - event.pid.pv
 
             z = PIDPlus(Kp=1, modifiers=SetpointPercent())
