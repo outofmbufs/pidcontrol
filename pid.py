@@ -21,7 +21,7 @@
 # SOFTWARE.
 
 import copy
-from collections import deque, ChainMap
+from collections import deque, ChainMap, Counter
 
 
 class PID:
@@ -83,6 +83,7 @@ class PID:
         p = self._proportional(e)
         i = self._integral(e)
         d = self._derivative(e)
+        self.last_pid = (p, i, d)
         return self._u(p, i, d)
 
     def _error(self):
@@ -120,7 +121,6 @@ class PID:
         return dpv
 
     def _u(self, p, i, d):
-        self.last_pid = (p, i, d)
         return (p * self.Kp) + (i * self.Ki) + (d * self.Kd)
 
     def __repr__(self):
@@ -200,7 +200,7 @@ class PIDPlus(PID):
             return                    # no notifications on no-change 'changes'
 
         # the notification protocol
-        event = PIDHookSetpoint(
+        event = PIDHookSetpointChange(
             pid=self, sp_prev=sp_prev, sp_set=v).notify(self.modifiers)
         self._setpoint = v if event.sp_now is None else event.sp_now
 
@@ -211,7 +211,7 @@ class PIDPlus(PID):
         # the various PIDModifiers to do their thing.
 
         # -- PRE --
-        # Run all the precalc's which may (or may not) establish some
+        # Run all the PreCalc's which may (or may not) establish some
         # of the process control values (e/p/i/d/u).
         cx = PIDHookPreCalc(pid=self).notify(self.modifiers)
 
@@ -234,6 +234,13 @@ class PIDPlus(PID):
         # testing for it. By far the common case is cx.u is still None here.
         if cx.u is None:
             cx.u = self._u(cx.p, cx.i, cx.d)
+
+        # MidCalcs and PostCalcs can compute 'u' arbitrarily, regardless of
+        # the p/i/d values. This makes last_pid less interesting, but it still
+        # needs to be noted. The p/i/d values themselves are fixed at this
+        # point (i.e., read-only in PostCalc).
+        self.last_pid = (cx.p, cx.i, cx.d)
+
         # again note the vars from the MidCalc are cloned to the PostCalc
         cx = PIDHookPostCalc(**cx.vars()).notify(self.modifiers)
 
@@ -279,12 +286,11 @@ class PIDPlus(PID):
 #
 # CONNECTIONS
 #
-# Each specific PIDHookEvent defines a name (via NOTIFYHANDLER attribute)
-# of a method that a PIDModifier is expected to supply if that PIDModifier
-# wants to receive that type of event.
+# Each specific PIDHookEvent defines a name of a method that a PIDModifier is
+# expected to supply if that PIDModifier wants to receive that type of event.
 #
-# For example, setpoint modifications generate a PIDHookSetpoint event.
-# The NOTIFYHANDLER attribute in PIDHookSetpoint is 'PH_setpoint_change'.
+# For example, setpoint modifications generate a PIDHookSetpointChange event.
+# The NOTIFYHANDLER for PIDHookSetpointChange is 'PH_setpoint_change'.
 # A PIDModifier that wishes to receive setpoint change events must provide
 # a method with that name and it will automatically receive these events.
 # To reduce the possibility of clashes with future modifier/event
@@ -317,6 +323,26 @@ class _PIDHookEvent:
     # these attributes are read-only even if '*' used in RW_VARS
     STAR_READONLY = {'pid'}
 
+    @classmethod
+    def handlername(cls):
+        try:
+            return cls.NOTIFYHANDLER
+        except AttributeError:
+            # PIDHookFooBar becomes PH_foo_bar
+            # If it doesn't start with PIDHook, None is returned.
+            # Callers need to check for that if they might possibly
+            # be invoking handlername() on this base class or on
+            # an intermediate subclass (which usually is not the case).
+            hname = cls.__name__
+            if not hname.startswith('PIDHook'):
+                return None
+            cls.NOTIFYHANDLER = 'PH'
+            for c in hname[7:]:
+                if c.isupper():
+                    cls.NOTIFYHANDLER += '_'
+                cls.NOTIFYHANDLER += c.lower()
+        return cls.NOTIFYHANDLER
+
     # Property/descriptor implementing read-only-ness
     class _ReadOnlyDescr:
         _PVTPREFIX = "__PVT_ReadOnly_"
@@ -328,9 +354,9 @@ class _PIDHookEvent:
         #    value    -- its initial value
         #    obj      -- the underlying PIDHookEvent OBJECT (not class)
         #
-        # The obj.__class__ (something like, e.g., PIDHookSetpoint) needs
-        # a data descriptor property created for this attrname, but that
-        # property should only be created ONCE (per attrname, per class).
+        # The obj.__class__ (something like, e.g., PIDHookSetpointChange)
+        # needs a data descriptor property created for this attrname, but
+        # that property should only be created ONCE (per attrname, per class).
         # In contrast, individual object instances each need, of course,
         # their own instance variable (object attribute) for the underlying
         # readonly value; that attribute name is built using _PVTPREFIX to
@@ -339,7 +365,7 @@ class _PIDHookEvent:
         def establish_property(cls, attrname, value, /, *, obj=None):
             """Factory for creating the property descriptors (dynamically)."""
 
-            pidhook_class = obj.__class__    # e.g., PIDHookSetpoint, etc.
+            pidhook_class = obj.__class__   # e.g., PIDHookSetpointChange, etc
 
             # See if there is already a data descriptor (i.e., if this is
             # not the first time establish_property() has been called for
@@ -412,7 +438,7 @@ class _PIDHookEvent:
         """
 
         for nth, m in enumerate(modifiers):
-            h = getattr(m, self.NOTIFYHANDLER, getattr(m, 'PH_default'))
+            h = getattr(m, self.handlername(), getattr(m, 'PH_default'))
             try:
                 h(self)        # ... this calls m.PH_foo(event)
             except HookStop:
@@ -441,7 +467,7 @@ class _PIDHookEvent:
 
 # with the above __init__ and notify as a framework, typically each
 # specific event is simply a subclass with some class variables:
-#    NOTIFYHANDLER -- the name of the corresponding handler to invoke
+#
 #    DEFAULTED_VARS -- dictionary of default attribute names/values that
 #                      will be used (if no explicit values given in init)
 #    RW_VARS        -- names of attributes that are allowed to be read-write.
@@ -450,31 +476,35 @@ class _PIDHookEvent:
 #                      case convenience, RW_VARS can be '*' (the string)
 #                      which will mean make all the attributes read/write
 #
-# Conceptually the NOTIFYHANDLER could have been programmatically
-# determined from the subclass name, but "explicit is better" won out here.
-#
 # The "DEFAULTED_VARS" is an alternate way to implement what would otherwise
 # be an __init()__ in each subclass with a custom signature and super() call
 # for *args/**kwargs. Subclasses can still do it that way if desired; but the
 # DEFAULTED_VARS mechanism makes trivial cases trivial and avoids boilerplate
 # like: "super().__init__(*args, arg1=arg1, arg2=arg2, ... **kwargs)"
 #
+# The name of the corresponding notify handler will be automatically
+# inferred from the subclass name, IF it starts with 'PIDHook'.
+# The name will be PH_foo where "foo" is everything that comes after
+# PIDHook but capital letters will be turned into lower case and have
+# an underbar preceding them. Thus: the automatic notification handler
+# name for PIDHookFooBar is: PH_foo_bar
+#
+# To override the automatic name, explicitly set a NOTIFYHANDLER class attr.
+#
 
 class PIDHookAttached(_PIDHookEvent):
-    NOTIFYHANDLER = 'PH_attached'
+    pass
 
 
 class PIDHookHookStopped(_PIDHookEvent):
-    NOTIFYHANDLER = 'PH_hookstopped'
+    pass
 
 
 class PIDHookInitialConditions(_PIDHookEvent):
-    NOTIFYHANDLER = 'PH_initial_conditions'
     DEFAULTED_VARS = dict(setpoint=None)
 
 
-class PIDHookSetpoint(_PIDHookEvent):
-    NOTIFYHANDLER = 'PH_setpoint_change'
+class PIDHookSetpointChange(_PIDHookEvent):
     DEFAULTED_VARS = dict(sp_now=None)
     RW_VARS = {'sp_now'}
 
@@ -486,15 +516,14 @@ class _PIDHook_Calc(_PIDHookEvent):
 
 
 class PIDHookPreCalc(_PIDHook_Calc):
-    NOTIFYHANDLER = 'PH_precalc'
+    pass
 
 
 class PIDHookMidCalc(_PIDHook_Calc):
-    NOTIFYHANDLER = 'PH_midcalc'
+    pass
 
 
 class PIDHookPostCalc(_PIDHook_Calc):
-    NOTIFYHANDLER = 'PH_postcalc'
     RW_VARS = 'u'         # setting others is a no-op, so prevent that error
 
 
@@ -530,14 +559,15 @@ class PIDModifier:
 
 
 class PIDHistory(PIDModifier):
-    """Adds a look-back record of control computations to a PID."""
+    """Look-back record, event counts."""
 
-    def __init__(self, n, *args, **kwargs):
-        """Adds a record of the past 'n' control computations to a PID."""
+    def __init__(self, n=1000, *args, **kwargs):
+        """Counts events and records the last 'n'."""
         super().__init__(*args, **kwargs)
         self.history = deque([], n)
+        self.eventcounts = Counter()
 
-    # this _default method gets all events and logs them
+    # this _default method gets all events and counts/logs them
     def PH_default(self, event):
         # if PIDHistory is the last in the modifier list then copying
         # the event is superfluous. But if there are modifiers after,
@@ -546,6 +576,7 @@ class PIDHistory(PIDModifier):
         # placed earlier in the stack it was done so to capture the event
         # state at that point. Therefore ... need to copy the event.
         self.history.append(copy.copy(event))
+        self.eventcounts[event.handlername()] += 1
 
 
 class I_Windup(PIDModifier):
@@ -566,7 +597,7 @@ class I_Windup(PIDModifier):
         self.w0 = a
         self.w1 = b
 
-    def PH_midcalc(self, event):
+    def PH_mid_calc(self, event):
         clamped = max(self.w0, min(event.pid.integration, self.w1))
         event.i = event.pid.integration = clamped
 
@@ -597,7 +628,7 @@ class I_SetpointReset(PIDModifier):
     def PH_setpoint_change(self, event):
         self._trigger = True
 
-    def PH_precalc(self, event):
+    def PH_pre_calc(self, event):
         # When triggered (by a setpoint change):
         #   - Reset the integration. It is as if the controller is
         #     starting over afresh (for integration)
@@ -696,7 +727,7 @@ class SetpointRamp(PIDModifier):
         finally:
             self._ramptime = saved_ramp
 
-    def PH_precalc(self, event):
+    def PH_pre_calc(self, event):
         # optimize the common case of no ramping in progress
         if self._countdown == 0:
             return
@@ -755,7 +786,7 @@ class BangBang(PIDModifier):
         self.off_value = off_value
         self.dead_value = dead_value
 
-    def PH_postcalc(self, event):
+    def PH_post_calc(self, event):
         if self.off_threshold is None:    # on_thr.. must not be None
             if event.u >= self.on_threshold:
                 val = self.on_value
@@ -813,8 +844,8 @@ class D_DeltaE(PIDModifier):
         if self.kickfilter:
             self.kickticks = 1
 
-    # done as midcalc so it doesn't have to (re)compute e itself
-    def PH_midcalc(self, event):
+    # done as MidCalc so it doesn't have to (re)compute e itself
+    def PH_mid_calc(self, event):
         if self.previous_e is None:     # special case for very first call
             event.d = 0
         elif self.kickticks == 0:
@@ -829,7 +860,6 @@ class D_DeltaE(PIDModifier):
 if __name__ == "__main__":
     import unittest
     import math
-    from collections import Counter
 
     class TestMethods(unittest.TestCase):
         def test_simple(self):
@@ -1087,10 +1117,10 @@ if __name__ == "__main__":
 
         def test_readonlyvars(self):
             class Foo(PIDModifier):
-                def PH_midcalc(self, event):
+                def PH_mid_calc(self, event):
                     event.d = 17
 
-                def PH_postcalc(self, event):
+                def PH_post_calc(self, event):
                     if event.d != 17:
                         raise ValueError(f"Got {event.d}")
                     try:
@@ -1127,11 +1157,11 @@ if __name__ == "__main__":
             class FooMod(PIDModifier):
                 counter = 0
 
-                def PH_precalc(self, event):
+                def PH_pre_calc(self, event):
                     event.foo = self.counter
                     self.counter += 1
 
-                def PH_postcalc(self, event):
+                def PH_post_calc(self, event):
                     if event.foo != self.counter - 1:
                         raise ValueError("XXX")
 
@@ -1151,7 +1181,7 @@ if __name__ == "__main__":
         def test_readme_2(self):
             # just testing another example fromthe README.md
             class UBash(PIDModifier):
-                def PH_precalc(self, event):
+                def PH_pre_calc(self, event):
                     event.u = .666
 
             z = PIDPlus(Kp=1, modifiers=UBash())
@@ -1160,7 +1190,7 @@ if __name__ == "__main__":
         def test_readme_3(self):
             # yet another README.md example test
             class SetpointPercent(PIDModifier):
-                def PH_precalc(self, event):
+                def PH_pre_calc(self, event):
                     event.e = (event.pid.setpoint / 100) - event.pid.pv
 
             z = PIDPlus(Kp=1, modifiers=SetpointPercent())
@@ -1217,7 +1247,7 @@ if __name__ == "__main__":
                 def PH_attached(self, event):
                     self.pid = event.pid     # implicitly testing this attach
 
-                def PH_hookstopped(self, event):
+                def PH_hook_stopped(self, event):
                     self.hookstops.append(event)
 
                 def PH_default(self, event):
@@ -1263,73 +1293,94 @@ if __name__ == "__main__":
             _ = PIDPlus(Kp=1, modifiers=[jx, jx])
 
         def test_notifications(self):
-            class NotificationChecker(PIDModifier):
-                def __init__(self, *args, **kwargs):
-                    super().__init__(*args, **kwargs)
-                    self.notifications = Counter()
+            class XCounter(PIDHistory):
+                def __init__(self, n=0, *args, **kwargs):
+                    super().__init__(n, *args, **kwargs)
+                    self.hookstopped = Counter()
 
                 def _gotevent(self, event):
-                    self.notifications[event.NOTIFYHANDLER] += 1
+                    super().PH_default(event)    # let PIDHistory count it
 
-                # explicitly ignore these
-                def PH_hookstopped(self, event):
-                    pass
+                # Hide hook_stopped from the underlying PIDHistory
+                # Count them separately
+                def PH_hook_stopped(self, event):
+                    stopped = event.event
+                    self.hookstopped[stopped.handlername()] += 1
 
                 def PH_default(self, event):
                     raise TypeError("DEFAULT HANDLER INVOKED")
+
+                @property
+                def totalcount(self):
+                    return (sum(self.eventcounts.values()) +
+                            sum(self.hookstopped.values()))
 
             class Stopper(PIDModifier):
                 def PH_default(self, event):
                     raise HookStop
 
-            # arguably working way too hard at DRY; make all the counters
-            # (handlers) by dynamically discovering NOTIFYHANDLER names
+            # dynamically discover the handlernames
             def _all_notification_method_names(cls):
                 for subcls in cls.__subclasses__():
                     yield from _all_notification_method_names(subcls)
-                    try:
-                        if subcls.NOTIFYHANDLER != 'PIDHookHookStopped':
-                            yield subcls.NOTIFYHANDLER
-                    except AttributeError:     # base class; possibly others
-                        pass
+                    if (nm := subcls.handlername()) is not None:
+                        yield nm
 
             METHODNAMES = set(_all_notification_method_names(_PIDHookEvent))
-            for nm in list(METHODNAMES):    # NOTE: modified within loop
-                if hasattr(NotificationChecker, nm):
-                    METHODNAMES.remove(nm)
-                else:
-                    setattr(
-                        NotificationChecker, nm, NotificationChecker._gotevent)
+            for nm in METHODNAMES:
+                # only set to _gotevent if not already in NotificationChecker
+                if not hasattr(XCounter, nm):
+                    setattr(XCounter, nm, XCounter._gotevent)
 
-            # so the idea of this test is to make a PID controller with
-            # several copies of the above notification count modifier, with
-            # the last one preceded by a HookStop emitter. Then put this
-            # mess through operations known/expected to result in
-            # every METHODNAMES entry being called exactly once. Of course
-            # the last nchk will have zero counts; the rest should have 1
-            # for every possible NOTIFYHANDLER name.
+            # Test Outline: make a PID with several XCounter modifiers,
+            # with a HookStop emitter ('stopper') somewhere in the middle.
+            # Perform operations known/expected to cause every METHODNAMES
+            # event exactly once. Test the count results - 1 per event
+            # in every XCounter before the stopper, and 1 hookstopped per
+            # event for every XCounter after.
 
-            nchks = [NotificationChecker() for i in range(3)]
             stopper = Stopper()
-            last = NotificationChecker()
-            nchks += [stopper, last]
+            precount = 3           # should be at least 2
+            postcount = 3          # should be at least 2
+            mods = [*[XCounter() for i in range(precount)],
+                    stopper,
+                    *[XCounter() for i in range(postcount)]]
 
-            z = PIDPlus(Kp=1, modifiers=nchks)
+            z = PIDPlus(Kp=1, modifiers=mods)
             z.setpoint = 17
             z.pid(0, dt=.01)
-            expected = 1
-            for i, nchk in enumerate(nchks):
-                if nchk is stopper:
-                    with self.subTest(m=m, note="LAST"):
-                        self.assertEqual(last.notifications[m], 0)
-                    expected = 0
+
+            # only events that had _gotevent as their handler are counted
+            COUNTED = (nm for nm in METHODNAMES
+                       if getattr(XCounter, nm) == XCounter._gotevent)
+
+            beforestopper = True
+            for i, mod in enumerate(mods):
+                if mod is stopper:
+                    beforestopper = False
+                    continue
+
+                if beforestopper:
+                    # In the ones preceding the stopper, each event
+                    # should have been seen once and no hook stops.
+                    seen = mod.eventcounts
+                    zeros = mod.hookstopped
                 else:
-                    for m in METHODNAMES:
-                        with self.subTest(m=m, i=i):
-                            self.assertEqual(nchk.notifications[m], expected)
-                    for v in nchk.notifications:
-                        with self.subTest(v=v):
-                            self.assertTrue(v in METHODNAMES)
+                    # In the 'last' it's the reverse
+                    seen = mod.hookstopped
+                    zeros = mod.eventcounts
+
+                for mname in COUNTED:
+                    with self.subTest(mname=mname, i=i):
+                        self.assertEqual(seen[mname], 1)
+                        self.assertEqual(zeros[mname], 0)
+                for v in ChainMap(seen.keys(), zeros.keys()):
+                    with self.subTest(v=v):
+                        self.assertTrue(v in METHODNAMES)
+
+                # whether real events or hookstopped, they should all
+                # have seen the same number in total
+                self.assertEqual(mods[0].totalcount, mod.totalcount)
 
         def test_hh(self):
             # a test of HookStop from naughty HookStop handlers
