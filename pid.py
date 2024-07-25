@@ -21,6 +21,7 @@
 # SOFTWARE.
 
 import copy
+import re
 from collections import deque, ChainMap, Counter
 
 
@@ -488,10 +489,27 @@ class _PIDHookEvent:
         return self._ReadOnlyDescr.vars(self)
 
     def __repr__(self):
-        s = self.__class__.__name__
-        pre = "("
+        s = self.__class__.__name__ + "("
+        pre = ""
         for a, v in self.vars().items():
             s += f"{pre}{a}={v!r}"
+            pre = ", "
+        return s + ")"
+
+    # the str form is meant to be slightly more human-friendly:
+    #    * The .pid object is omitted entirely
+    #    * Anything whose __str__ matches r'<[a-z]*\.[^ ]* object at'
+    #      becomes <.__class__.__name__>
+    def __str__(self):
+        s = self.__class__.__name__ + "("
+        pre = ""
+        for a, v in self.vars().items():
+            if a == 'pid':
+                continue
+            vstr = str(v)
+            if re.match(r'\<[a-z]*\.[^ ]* object at', vstr):
+                continue
+            s += f"{pre}{a}={vstr}"
             pre = ", "
         return s + ")"
 
@@ -685,7 +703,19 @@ class SetpointRamp(PIDModifier):
     """Add setpoint ramping (smoothing out setpoint changes) to a PID"""
 
     def __init__(self, secs, hiddenramp=False, *args, **kwargs):
-        """Smooth (i.e., ramp) setpoint changes over 'secs' seconds."""
+        """Smooth (i.e., ramp) setpoint changes over 'secs' seconds.
+
+        If 'hiddenramp' is False (the default), the pid .setpoint attribute
+        will change on each .pid() call during the ramp period. This means
+        the ramping will be externally visible. This ensures that any other
+        modifiers can "see" the ramping and will be notified of each change.
+
+        If hiddenramp is True, the pid .setpoint attribute will appear to
+        immediately be set to the target value, but the internal calculation
+        of the error term (which feeds p/i/d terms) will be based on the
+        (hidden) ramping setpoint value.
+        """
+
         if secs < 0:                # NOTE: secs is allowed to be zero
             raise ValueError(f"ramp time (={secs}) must not be negative")
 
