@@ -124,8 +124,8 @@ class PID:
         return (p * self.Kp) + (i * self.Ki) + (d * self.Kd)
 
     def __repr__(self):
-        s = self.__class__.__name__
-        pre = "("
+        s = self.__class__.__name__ + "("
+        pre = ""
         # NOTE: If __repr__ requested in PIDHookAttached processing, it
         #       is before Kp/etc exist. That's why 'dflt' is in getattr()
         for a, dflt in (('Kp', 0), ('Ki', 0), ('Kd', 0)):
