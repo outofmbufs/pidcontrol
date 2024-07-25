@@ -695,9 +695,19 @@ class SetpointRamp(PIDModifier):
 
     def _noramp(self, /, *, setpoint):
         """Returns state to 'no ramp in progress'."""
-        self._start_sp = setpoint    # starting setpoint
-        self._target_sp = setpoint   # ending setpoint
-        self._countdown = 0          # time remaining in ramp
+        self._start_sp = setpoint            # starting setpoint
+        self._target_sp = setpoint           # ending setpoint
+        self._set_real_setpoint(setpoint)    # observed setpoint
+        self._countdown = 0                  # time remaining in ramp
+
+    def _ramped(self):
+        """Return the current (ramped) setpoint based on _countdown"""
+        if self._countdown == 0:
+            return self._target_sp
+        else:
+            pcttime = (self._ramptime - self._countdown) / self._ramptime
+            totaldelta = (self._target_sp - self._start_sp)
+            return self._clamper(self._start_sp + (totaldelta * pcttime))
 
     # Enforce one PIDPlus per SetpointRamp (because stateful)
     # NOTE: This also establishes the .pid attribute (at attach time)
@@ -710,9 +720,8 @@ class SetpointRamp(PIDModifier):
 
     @secs.setter
     def secs(self, v):
-        self._ramptime = v
         try:
-            midramp = self.pid.setpoint != self._target_sp
+            midramp = self._ramped() != self._target_sp
         except AttributeError:         # not attached yet
             midramp = False
 
@@ -720,12 +729,13 @@ class SetpointRamp(PIDModifier):
             # This arbitrarily defines the semantic of a mid-ramp secs change
             # to mean: continue whatever ramping remains, with that remaining
             # ramp spread out over the new secs
-            self._start_sp = self.pid.setpoint   # i.e., ramp starts HERE ...
-            self._countdown = v                  # ... NOW
+            self._start_sp = self._ramped()   # i.e., ramp starts HERE ...
 
             # but if it's been set to zero, just go there RIGHT NOW
             if v == 0:
-                self.__set_real_setpoint(self._target_sp)
+                self._set_real_setpoint(self._target_sp)
+
+        self._ramptime = self._countdown = v
 
     def __repr__(self):
         return f"{self.__class__.__name__}({self.secs})"
@@ -747,9 +757,15 @@ class SetpointRamp(PIDModifier):
         self._countdown = self._ramptime
         clampf = min if self._start_sp < self._target_sp else max
         self._clamper = lambda x: clampf(x, self._target_sp)
+        event.sp_now = self._ramped()     # so it won't change at all, yet
 
-    def __set_real_setpoint(self, v):
+    def _set_real_setpoint(self, v):
         """Set the real setpoint in the underlying pid, bypasing ramping."""
+
+        # This ends up being called from __init__ before being attached.
+        # So have to check for no .pid yet
+        if not hasattr(self, 'pid'):
+            return
 
         # This try/finally block is necessary because there could be OTHER
         # modifiers with PH_setpoint_change handlers, so anything in terms
@@ -775,7 +791,7 @@ class SetpointRamp(PIDModifier):
         # be one extra tick for the rest. No one cares; this is good enough.
         if self._countdown <= event.pid.dt:
             # last tick; slam to _target_sp in case of any floating fuzz.
-            self.__set_real_setpoint(self._target_sp)
+            self._set_real_setpoint(self._target_sp)
             self._countdown = 0
         else:
             # Still ramping ... This is the normal ramping case but could
@@ -783,10 +799,7 @@ class SetpointRamp(PIDModifier):
             # in which case pcttime will be very very close to 1.00 and
             # the next tick after this will trigger the above branch
             self._countdown -= event.pid.dt
-            pcttime = (self._ramptime - self._countdown) / self._ramptime
-            totaldelta = (self._target_sp - self._start_sp)
-            ramped = self._clamper(self._start_sp + (totaldelta * pcttime))
-            self.__set_real_setpoint(ramped)
+            self._set_real_setpoint(self._ramped())
 
 
 #
@@ -1017,7 +1030,19 @@ if __name__ == "__main__":
             self.assertEqual(p.pid(pv2, dt=1), u2)
             self.assertEqual(p.pid(pv3, dt=1), u3)
 
-        def test_setpointramp(self):
+        def test_setpointramp_trivia(self):
+            # a few very directed simple tests at some prior bugs
+
+            p = PIDPlus(modifiers=SetpointRamp(1))
+
+            initial_setpoint = p.setpoint    # this will be zero
+
+            p.setpoint = 10
+            # it should read back as zero because the ramp should be
+            # set up but no ramping has happened yet.
+            self.assertEqual(p.setpoint, initial_setpoint)
+
+        def test_spramp1(self):
             ramptime = 17       # just to be ornery with division/fuzz
             setpoint = 5
             dt = 0.100
@@ -1036,6 +1061,7 @@ if __name__ == "__main__":
 
             # now verify that it ramps ... go up to 2*setpoint
             p.setpoint = 2 * setpoint
+
             ramped = setpoint
             for i in range(int((ramptime / dt) + 0.5)):
                 with self.subTest(i=i):
