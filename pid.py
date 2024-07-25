@@ -684,12 +684,13 @@ class I_SetpointReset(PIDModifier):
 class SetpointRamp(PIDModifier):
     """Add setpoint ramping (smoothing out setpoint changes) to a PID"""
 
-    def __init__(self, secs, *args, **kwargs):
+    def __init__(self, secs, hiddenramp=False, *args, **kwargs):
         """Smooth (i.e., ramp) setpoint changes over 'secs' seconds."""
         if secs < 0:                # NOTE: secs is allowed to be zero
             raise ValueError(f"ramp time (={secs}) must not be negative")
 
         super().__init__(*args, **kwargs)
+        self._hiddenramp = hiddenramp
         self._ramptime = secs
         self._noramp(setpoint=0)
 
@@ -757,7 +758,10 @@ class SetpointRamp(PIDModifier):
         self._countdown = self._ramptime
         clampf = min if self._start_sp < self._target_sp else max
         self._clamper = lambda x: clampf(x, self._target_sp)
-        event.sp_now = self._ramped()     # so it won't change at all, yet
+        if self._hiddenramp:
+            event.sp_now = self._target_sp    # change it immediately
+        else:
+            event.sp_now = self._ramped()     # or .. make it ramp
 
     def _set_real_setpoint(self, v):
         """Set the real setpoint in the underlying pid, bypasing ramping."""
@@ -766,6 +770,13 @@ class SetpointRamp(PIDModifier):
         # So have to check for no .pid yet
         if not hasattr(self, 'pid'):
             return
+
+        # if the ramp is being hidden, then regardless of what the rest of
+        # the SetpointRamp code wanted to set the .setpoint to, set it
+        # to the target (!) ... see PH_base_terms for the reason this
+        # still ends up providing ramping even while hiding it from .setpoint
+        if self._hiddenramp:
+            v = self._target_sp
 
         # This try/finally block is necessary because there could be OTHER
         # modifiers with PH_setpoint_change handlers, so anything in terms
@@ -800,6 +811,12 @@ class SetpointRamp(PIDModifier):
             # the next tick after this will trigger the above branch
             self._countdown -= event.pid.dt
             self._set_real_setpoint(self._ramped())
+
+            # when the ramping setpoint is being hidden, this needs to
+            # supply an alternate 'e' making use of the ramping setpoint
+            # rather than the public .setpoint
+            if self._hiddenramp:
+                event.e = self._ramped() - self.pid.pv
 
 
 #
