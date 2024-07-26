@@ -21,6 +21,7 @@
 # SOFTWARE.
 
 import copy
+import functools
 import re
 from collections import deque, ChainMap, Counter
 
@@ -326,6 +327,7 @@ class PIDPlus(PID):
 # creates a record of them for analysis/debug.
 #
 
+
 # ----------------------------
 # PIDHookEvent class hierarchy.
 # ----------------------------
@@ -461,13 +463,46 @@ class _PIDHookEvent:
             cls.__RO = cls.READONLY_VARS | {'pid'}
         return cls.__RO
 
-    def notify(self, modifiers):
+    # Decorator to count recursion levels.
+    # Used on .notify(), primarily for debugging/logging; helps for
+    # analyzing nested notifications. Example: PH_base_terms in
+    # SetpointRamp can cause a nested PH_setpoint_change event.
+    #
+    # This is not written thread-safely if there are multiple PIDPlus
+    # objects simultaneously operating from different threads (because
+    # the hidden recursion count is stored per-method in a closure)
+    @staticmethod
+    def _track_recursion(*, argname):
+        def _deco(f):
+            # putting the count into a dictionary (vs the more-obvious
+            # scalar/nonlocal way) simplifies forming the args for
+            # the _wrapped invocation of f() (i.e., via **arg_d)
+            countarg_d = {argname: 0}
+
+            @functools.wraps(f)
+            def _wrapped(*args, **kwargs):
+                countarg_d[argname] += 1
+                try:
+                    rv = f(*args, **countarg_d, **kwargs)
+                finally:
+                    countarg_d[argname] -= 1
+                return rv
+            return _wrapped
+        return _deco
+
+    @_track_recursion(argname="_nestinglevel")
+    def notify(self, modifiers, /, *, _nestinglevel=0):
         """Invoke the notification handler for all modifiers.
 
         For notational convenience, returns self, for 1-liners like:
             event = PIDHookSomething(foo).notify(modlist)
         when the returned event is needed even after the notify()
+
+        NOTE: _nestinglevel argument is intended for internal use.
+              It tracks event nesting, useful for logging/debug.
         """
+
+        self._notify_nestinglevel = _nestinglevel
 
         for nth, m in enumerate(modifiers):
             h = getattr(m, self.handlername(), getattr(m, 'PH_default'))
@@ -500,18 +535,25 @@ class _PIDHookEvent:
     #    * The .pid object is omitted entirely
     #    * Anything whose __str__ matches r'<[a-z]*\.[^ ]* object at'
     #      becomes <.__class__.__name__>
+    #    * the _notify_nestinglevel is omitted unless > 1 and even then
+    #      it is reported separately: "NESTED(n)"
     def __str__(self):
         s = self.__class__.__name__ + "("
         pre = ""
+        post = ")"
         for a, v in self.vars().items():
             if a == 'pid':
+                continue
+            if a == '_notify_nestinglevel':
+                if v > 1:
+                    post += f" NESTED({v})"
                 continue
             vstr = str(v)
             if re.match(r'\<[a-z]*\.[^ ]* object at', vstr):
                 continue
             s += f"{pre}{a}={vstr}"
             pre = ", "
-        return s + ")"
+        return s + post
 
 
 # The _PIDHookEvent .__init__() and .notify() methods provide a framework so
@@ -1274,6 +1316,23 @@ if __name__ == "__main__":
             z = PIDPlus(modifiers=FooMod())
             z.pid(1, dt=0.01)         # that this doesn't bomb is the test
 
+        def test_nestinglevel_exceptions(self):
+            # make sure that _notify_nestinglevel in events always starts
+            # at 1, even after something has bailed out via exception.
+            # (Was a bug during initial development)
+            class BadMod(PIDModifier):
+                def PH_default(self, event):
+                    raise TypeError("OH MY")
+            with self.assertRaises(TypeError):
+                # that alone will cause a PIDHookAttached,
+                # which will bail out of the BadMod w/TypeError
+                z = PIDPlus(Kp=1, modifiers=BadMod())
+
+            # now make sure nesting still starts at 1
+            h = PIDHistory()
+            z = PIDPlus(Kp=1, modifiers=h)
+            self.assertEqual(h.history[0]._notify_nestinglevel, 1)
+
         def test_readme_1(self):
             # just testing an example given in the README.md
             class SetpointPercent(PIDModifier):
@@ -1489,24 +1548,57 @@ if __name__ == "__main__":
                 self.assertEqual(mods[0].totalcount, mod.totalcount)
 
         def test_hh(self):
-            # a test of HookStop from naughty HookStop handlers
+            # a test of HookStop being raised within HookStop handlers
             class Stopper(PIDModifier):
-                def PH_default(self, event):
+                def __init__(self, *args, ut, **kwargs):
+                    super().__init__(*args, **kwargs)
+                    self.ut = ut             # unittest object
+                    self.got_ic = False
+                    self.got_atd = False
+
+                def PH_hook_stopped(self, event):
+                    # pluck the nesting level from the event internal attr
+                    nestinglevel = event._notify_nestinglevel
+
+                    # first off this should not occur at nestinglevel 1
+                    # because it is always a result of a prior modifier
+                    # raising HookStop within a handler
+                    self.ut.assertTrue(nestinglevel > 1)
+
+                    # compute the implied depth from the HookStopped chain
                     foo = event
                     hh_depth = 0
                     while isinstance(foo, PIDHookHookStopped):
                         hh_depth += 1
                         foo = foo.event
 
-                    try:
-                        self.maxrecursion = max(self.maxrecursion, hh_depth)
-                    except AttributeError:
-                        self.maxrecursion = hh_depth
+                    # and compare to nestinglevel (which starts at 1)
+                    self.ut.assertEqual(hh_depth+1, nestinglevel)
                     raise HookStop
 
-            mods = [Stopper() for _ in range(10)]
+                def PH_attached(self, event):
+                    # pluck the nesting level from the event internal attr
+                    nestinglevel = event._notify_nestinglevel
+                    self.ut.assertEqual(nestinglevel, 1)
+                    self.ut.assertFalse(self.got_atd)
+                    self.got_atd = True
+                    raise HookStop
+
+                def PH_initial_conditions(self, event):
+                    # pluck the nesting level from the event internal attr
+                    nestinglevel = event._notify_nestinglevel
+                    self.ut.assertEqual(nestinglevel, 1)
+                    self.ut.assertTrue(self.got_atd)
+                    self.ut.assertFalse(self.got_ic)
+                    self.got_ic = True
+                    raise HookStop
+
+                def PH_default(self, event):
+                    raise TypeError("DEFAULT")
+
+            mods = [Stopper(ut=self) for _ in range(10)]
             z = PIDPlus(modifiers=mods)
-            for i, m in enumerate(mods):
-                self.assertEqual(i, m.maxrecursion)
+            # NOTE: the test runs in the handlers, implicitly, and just
+            #       creating the PIDPlus triggers attached and init_conds.
 
     unittest.main()
