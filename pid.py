@@ -651,7 +651,9 @@ class PIDModifier:
 class PIDHistory(PIDModifier):
     """Look-back record, event counts."""
 
-    def __init__(self, n=1000, *args, detail=False, **kwargs):
+    DEFAULTSIZE = 1000
+
+    def __init__(self, n=DEFAULTSIZE, *args, detail=False, **kwargs):
         """Counts events and records the last 'n' of them.
 
         If 'n' is None, the deque will be unbounded and store all events.
@@ -730,28 +732,61 @@ class PIDHistory(PIDModifier):
             gen = self.history             # event wasn't in there at all
         yield from gen
 
+    def __repr__(self):
+        s = f"{self.__class__.__name__}("
+        pre = ""
+        if self.history.maxlen != self.DEFAULTSIZE:
+            s += f"{self.history.maxlen}"
+            pre = ", "
+        if self.detail:
+            s += pre + "detail=True"
+        return s + ")"
+
 
 class I_Windup(PIDModifier):
     """Enhances I control with "windup" limit."""
 
     def __init__(self, w, *args, **kwargs):
-        super().__init__(*args, **kwargs)
         """The integration value will be held to [-w, w] range.
 
-        OPTIONALLY: if w is a tuple, then the integration value
-                    will be held to [a, b] range where:
+        OPTIONALLY: if w is a tuple then the integration value will be
+                    held to [a, b] range where:
                        a, b = sorted(w)
+        Instead of specifying a tuple for w, it is also allowed for
+        there to be exactly two non-keyword arguments, both numeric.
+        They will be taken as a "w tuple" and treated accordingly.
         """
+
+        # see if the two-arg numeric form
+        if len(args) == 1:
+            try:
+                # this is testing if args[0] is number-ish
+                numeric = args[0] < 0 or args[0] >= 0
+            except (TypeError, ValueError):
+                numeric = False
+            if numeric:
+                w = (w, args[0])
+                args = []
         try:
             a, b = sorted(w)
         except TypeError:
             a, b = -abs(w), abs(w)    # prevent negative shenanigans
+
+        super().__init__(*args, **kwargs)
         self.w0 = a
         self.w1 = b
 
     def PH_modify_terms(self, event):
         clamped = max(self.w0, min(event.pid.integration, self.w1))
         event.i = event.pid.integration = clamped
+
+    def __repr__(self):
+        s = f"{self.__class__.__name__}("
+        if abs(self.w0) == abs(self.w1):
+            s += f"{abs(self.w0)}"
+        else:
+            s += f"({self.w0}, {self.w1})"
+        return s + ")"
 
 
 class I_SetpointReset(PIDModifier):
@@ -1347,14 +1382,27 @@ if __name__ == "__main__":
 
         def test_windup2(self):
             # like test_windup but asymmetric limits
-            wlo = 1.0
+            wlo = 1.0     # test only works if this is > 0
             whi = 2.25
             windup_limits = [whi, wlo]   # deliberately "backwards"
             dt = 0.1
             p = PIDPlus(Ki=1, modifiers=I_Windup(windup_limits))
             p.initial_conditions(pv=0, setpoint=1)
+
+            # because wlo > 0, even a tiny tiny amount of integration
+            # should jump up to wlo immediately; test that
+            p.pid(0, dt=dt/1000)
+            self.assertEqual(p.integration, wlo)
+
+            # now do enough to exceed whi for certain, and test that
+            # the integration value is within limits the whole way
             for i in range(int(whi / dt) + 1):
                 p.pid(0, dt=dt)
+                # note: it's known to be > (not >=) because there's already
+                # one pid() call above, so this first one should add more
+                self.assertTrue(p.integration > wlo)
+                self.assertTrue(p.integration <= whi)
+
             self.assertEqual(p.integration, whi)
             # whatever the u value is now, it should stay here as there
             # can be no more integration.
