@@ -22,6 +22,7 @@
 
 import copy
 import functools
+import itertools
 import re
 from collections import deque, ChainMap, Counter
 
@@ -247,7 +248,7 @@ class PIDPlus(PID):
         # This is where most modifiers do their work, given the "raw"
         # p/i/d/ values (though they potentially were supplied by
         # a modifier, not by the normal calculation).
-        cx = PIDHookModifyTerms(**cx.vars()).notify(self.modifiers)
+        cx = PIDHookModifyTerms(**cx.attrs()).notify(self.modifiers)
 
         # Generally 'u' calculation should be overridden in a CalculateU.
         # See, for example, BangBang. But allow for it in ModifyTerms by
@@ -263,8 +264,8 @@ class PIDPlus(PID):
 
         # THIRD (final) PIDHookEvent: CalculateU
         # This is where a modifier such as BangBang can do violence to 'u'
-        # Note again: vars from the ModifyTerms are cloned to the CalculateU
-        cx = PIDHookCalculateU(**cx.vars()).notify(self.modifiers)
+        # Note: attrs from the ModifyTerms are cloned to the CalculateU
+        cx = PIDHookCalculateU(**cx.attrs()).notify(self.modifiers)
 
         # Whatever 'u' came through all that ... that's the result!
         return cx.u
@@ -335,8 +336,8 @@ class PIDPlus(PID):
 class _PIDHookEvent:
     """Base class for events that get generated within PIDPlus."""
 
-    DEFAULTED_VARS = {}       # subclasses will override as appropriate
-    READONLY_VARS = {'*'}     # by default, everything is readonly
+    DEFAULTED = {}       # subclasses will override as appropriate
+    READONLY = {'*'}     # by default, everything is readonly
 
     @classmethod
     def handlername(cls):
@@ -408,13 +409,13 @@ class _PIDHookEvent:
 
         # readonly attributes won't be in (generic) vars(), and their
         # underlying ("privatized") names will. So vars() is not
-        # (very) helpful. Instead, _Readonly class provides its own
-        # vars() implementation. This will return all the appropriate
-        # attribute names, including the readonly ones, and not any
+        # (very) helpful. Instead, _Readonly class provides an attrs()
+        # method, which returns all the appropriate attribute names and
+        # their values, including the readonly ones, and not any
         # of the privatized ("underlying") names.
         @classmethod
-        def vars(cls, obj):
-            """like vars() but finesse readonly name shenanigans."""
+        def attrs(cls, obj):
+            """Return a dictionary of attributes, finessing readonly stuff."""
             vd = {}
             for a, v in vars(obj).items():
                 if a.startswith(cls._PVTPREFIX):
@@ -436,7 +437,7 @@ class _PIDHookEvent:
                 f"attempted deletion of read-only attr '{self._name}'")
 
     def __init__(self, /, **kwargs):
-        # READONLY_VARS has three implicit semantics:
+        # READONLY has three implicit semantics:
         #    - None means set()
         #    - '*' matches everything
         #    - 'pid' is hardwired as always read-only
@@ -446,7 +447,7 @@ class _PIDHookEvent:
         except AttributeError:
             readonlys = self.__ro()
 
-        for k, v in ChainMap(kwargs, self.DEFAULTED_VARS).items():
+        for k, v in ChainMap(kwargs, self.DEFAULTED).items():
             if {k, '*'} & readonlys:
                 self._ReadOnlyDescr.establish_property(k, v, obj=self)
             else:
@@ -457,10 +458,10 @@ class _PIDHookEvent:
     # automatically makes 'pid' readonly whether specified or not.
     @classmethod
     def __ro(cls):
-        if cls.READONLY_VARS is None:
+        if cls.READONLY is None:
             cls.__RO = {'pid'}
         else:
-            cls.__RO = cls.READONLY_VARS | {'pid'}
+            cls.__RO = cls.READONLY | {'pid'}
         return cls.__RO
 
     # Decorator to count recursion levels.
@@ -476,7 +477,7 @@ class _PIDHookEvent:
         def _deco(f):
             # putting the count into a dictionary (vs the more-obvious
             # scalar/nonlocal way) simplifies forming the args for
-            # the _wrapped invocation of f() (i.e., via **arg_d)
+            # the _wrapped invocation of f() (i.e., via **countarg_d)
             countarg_d = {argname: 0}
 
             @functools.wraps(f)
@@ -519,21 +520,21 @@ class _PIDHookEvent:
                 break
         return self            # notational convenience
 
-    def vars(self):
+    def attrs(self):
         """Built-in vars returns gibberish for readonly's; this doesn't."""
-        return self._ReadOnlyDescr.vars(self)
+        return self._ReadOnlyDescr.attrs(self)
 
     def __repr__(self):
         s = self.__class__.__name__ + "("
         pre = ""
-        for a, v in self.vars().items():
+        for a, v in self.attrs().items():
             s += f"{pre}{a}={v!r}"
             pre = ", "
         return s + ")"
 
     # the str form is meant to be slightly more human-friendly:
     #    * The .pid object is omitted entirely
-    #    * Anything whose __str__ matches r'<[a-z]*\.[^ ]* object at'
+    #    * Anything whose __str__ matches r'<[a-z_]*\.[^ ]* object at'
     #      becomes <.__class__.__name__>
     #    * the _notify_nestinglevel is omitted unless > 1 and even then
     #      it is reported separately: "NESTED(n)"
@@ -541,7 +542,7 @@ class _PIDHookEvent:
         s = self.__class__.__name__ + "("
         pre = ""
         post = ")"
-        for a, v in self.vars().items():
+        for a, v in self.attrs().items():
             if a == 'pid':
                 continue
             if a == '_notify_nestinglevel':
@@ -549,8 +550,8 @@ class _PIDHookEvent:
                     post += f" NESTED({v})"
                 continue
             vstr = str(v)
-            if re.match(r'\<[a-z]*\.[^ ]* object at', vstr):
-                continue
+            if re.match(r'\<[a-z_]*\.[^ ]* object at', vstr):
+                vstr = f"<{v.__class__.__name__}>"
             s += f"{pre}{a}={vstr}"
             pre = ", "
         return s + post
@@ -560,16 +561,16 @@ class _PIDHookEvent:
 # that typically the specific event types are just subclasses with a
 # few class variables:
 #
-#    DEFAULTED_VARS -- dictionary of default attribute names/values that
-#                      will be used (if no explicit values given in init)
-#    READONLY_VARS  -- set() ... names of attributes that are read-only.
-#                      The default value is {'*'} which means all attributes
-#                      will be read-only. NOTE: 'pid' is hard-wired read-only.
+#    DEFAULTED -- dictionary of default attribute names/values that
+#                 will be used (if no explicit values given in init)
+#    READONLY  -- set() ... names of attributes that are read-only.
+#                 The default value is {'*'} which means all attributes
+#                 will be read-only. NOTE: 'pid' is hard-wired read-only.
 #
-# The "DEFAULTED_VARS" is an alternate way to implement what would otherwise
+# The "DEFAULTED" is an alternate way to implement what would otherwise
 # be an __init()__ in each subclass with a custom signature and super() call
 # for *args/**kwargs. Subclasses can still do it that way if desired; but the
-# DEFAULTED_VARS mechanism makes trivial cases trivial and avoids boilerplate
+# DEFAULTED mechanism makes trivial cases trivial and avoids boilerplate
 # like: "super().__init__(*args, arg1=arg1, arg2=arg2, ... **kwargs)"
 #
 # The name of the corresponding notify handler will be automatically
@@ -591,29 +592,29 @@ class PIDHookHookStopped(_PIDHookEvent):
 
 
 class PIDHookInitialConditions(_PIDHookEvent):
-    DEFAULTED_VARS = dict(setpoint=None)
+    DEFAULTED = dict(setpoint=None)
 
 
 class PIDHookSetpointChange(_PIDHookEvent):
-    DEFAULTED_VARS = dict(sp_now=None)
-    READONLY_VARS = {'sp_prev', 'sp_set'}     # sp_now will be read/write
+    DEFAULTED = dict(sp_now=None)
+    READONLY = {'sp_prev', 'sp_set'}     # sp_now will be read/write
 
 
-# Base for BaseTerms, ModifyTerms, CalculateU. Establish default vars.
+# Base for BaseTerms, ModifyTerms, CalculateU. Establish defaults.
 class _PIDHook_Calc(_PIDHookEvent):
-    DEFAULTED_VARS = dict(e=None, p=None, i=None, d=None, u=None)
+    DEFAULTED = dict(e=None, p=None, i=None, d=None, u=None)
 
 
 class PIDHookBaseTerms(_PIDHook_Calc):
-    READONLY_VARS = None
+    READONLY = None
 
 
 class PIDHookModifyTerms(_PIDHook_Calc):
-    READONLY_VARS = {'e'}
+    READONLY = {'e'}
 
 
 class PIDHookCalculateU(_PIDHook_Calc):
-    READONLY_VARS = {'e', 'p', 'i', 'd'}
+    READONLY = {'e', 'p', 'i', 'd'}
 
 
 # Any PIDModifier that wants to stop hook processing raises this:
@@ -650,22 +651,84 @@ class PIDModifier:
 class PIDHistory(PIDModifier):
     """Look-back record, event counts."""
 
-    def __init__(self, n=1000, *args, **kwargs):
-        """Counts events and records the last 'n'."""
+    def __init__(self, n=1000, *args, detail=False, **kwargs):
+        """Counts events and records the last 'n' of them.
+
+        If 'n' is None, the deque will be unbounded and store all events.
+        CAUTION: The deque could grow enormously large. CAVEAT CODER.
+
+        If 'detail' is True (default: False), the underlying pid attributes
+        are logged as attribute 'pidinfo' added to each event.
+        """
+
         super().__init__(*args, **kwargs)
-        self.history = deque([], n)
+        self.detail = detail
         self.eventcounts = Counter()
+        self.resize(n, preserve=None)
 
     # this _default method gets all events and counts/logs them
     def PH_default(self, event):
-        # if PIDHistory is the last in the modifier list then copying
-        # the event is superfluous. But if there are modifiers after,
-        # they get the same event object (which is part of how the whole
-        # protocol works, after all) but presumably if this PIDHistory was
-        # placed earlier in the stack it was done so to capture the event
-        # state at that point. Therefore ... need to copy the event.
-        self.history.append(copy.copy(event))
-        self.eventcounts[event.handlername()] += 1
+        # Make a copy of the event for two reasons:
+        #   1) If 'detail' is true, vars(pid) is added to it for logging
+        #      (general principles: prefer to not modify 'event' that way)
+        #
+        #   2) If this PIDHistory is not the last in the modifier list then
+        #      subsequent handlers might modify event, which will change this
+        #      entry. Presumably
+        #      of putting this earlier in the modifiers list was to capture
+        #      the state NOW ... so that's another need to copy it.
+        e2 = copy.copy(event)
+        if self.detail:
+            try:
+                # copy vars() result for the usual "want static data" reason
+                e2.pidinfo = dict(**vars(event.pid))
+            except AttributeError:
+                # probably never happens but allow for no .pid attr
+                e2.pidinfo = None
+        self.history.append(e2)
+        self.eventcounts[e2.handlername()] += 1
+
+    def resize(self, n, /, *, preserve='*'):
+        """Choose a new maximum size ('n') for history.
+
+        With just one argument, preserves tail of existing entries w.r.t. 'n'.
+        If 'n' is None the new size is infinite. (BE CAREFUL WITH THIS)
+
+        Keyword-only argument 'preserve' controls how much old history
+        is preserved (but w.r.t. 'n'):
+           preserve=None  -- No prior history is preserved
+           preserve=x     -- 'x' must be an iterable and its items will
+                             be entered into the new history (i.e., preserved
+                             in accordance with 'n')
+
+        See also: .since() which may be useful/appropriate for 'preserve'
+        """
+
+        if preserve == '*':
+            preserve = self.history
+        elif preserve is None:
+            preserve = []
+        self.history = deque(preserve, n)
+
+    # Generate a list of events ignoring ones up to and including the given.
+    def since(self, event=None):
+        """Generate events from the history.
+
+        Given an 'event' previously obtained from this method or from
+        .history directly, generate subsequent events.
+
+        If 'event' is not found in .history generate all .history events.
+        With no arguments, or with event=None, generates all.
+        """
+
+        # implementation note: event=None is handled implicitly because
+        # it is known that None will never be *in* .history
+        gen = itertools.dropwhile(lambda x: x != event, self.history)
+        try:
+            _ = next(gen)                  # skip the event itself
+        except StopIteration:
+            gen = self.history             # event wasn't in there at all
+        yield from gen
 
 
 class I_Windup(PIDModifier):
@@ -744,7 +807,7 @@ class I_SetpointReset(PIDModifier):
 class SetpointRamp(PIDModifier):
     """Add setpoint ramping (smoothing out setpoint changes) to a PID"""
 
-    def __init__(self, secs, hiddenramp=False, *args, **kwargs):
+    def __init__(self, secs, *args, hiddenramp=False, threshold=0, **kwargs):
         """Smooth (i.e., ramp) setpoint changes over 'secs' seconds.
 
         If 'hiddenramp' is False (the default), the pid .setpoint attribute
@@ -760,10 +823,13 @@ class SetpointRamp(PIDModifier):
 
         if secs < 0:                # NOTE: secs is allowed to be zero
             raise ValueError(f"ramp time (={secs}) must not be negative")
+        if threshold < 0:
+            raise ValueError(f"threshold (={threshold}) must not be negative")
 
         super().__init__(*args, **kwargs)
         self._hiddenramp = hiddenramp
         self._ramptime = secs
+        self._threshold = threshold
         self._noramp(setpoint=0)
 
     def _noramp(self, /, *, setpoint):
@@ -810,9 +876,6 @@ class SetpointRamp(PIDModifier):
 
         self._ramptime = self._countdown = v
 
-    def __repr__(self):
-        return f"{self.__class__.__name__}({self.secs})"
-
     # If the setpoint gets changed via an initial_conditions method
     # then it happens immediately (no ramping).
     def PH_initial_conditions(self, event):
@@ -821,8 +884,13 @@ class SetpointRamp(PIDModifier):
         self._noramp(setpoint=sp)
 
     def PH_setpoint_change(self, event):
-        # NO-OP conditions: ramp parameter zero, or no change in sp
+        # NO-OP conditions:
+        #   ramp parameter zero,
+        #   no change in setpoint
+        #   change is below threshold
         if self._ramptime == 0 or event.sp_set == self._target_sp:
+            return
+        if abs(event.sp_set - self.pid.setpoint) < self._threshold:
             return
 
         self._start_sp = event.sp_prev
@@ -889,6 +957,14 @@ class SetpointRamp(PIDModifier):
             # rather than the public .setpoint
             if self._hiddenramp:
                 event.e = self._ramped() - self.pid.pv
+
+    def __repr__(self):
+        s = f"{self.__class__.__name__}({self._ramptime}"
+        if self._hiddenramp:
+            s += ", hiddenramp=True"
+        if self._threshold > 0:
+            s += f", threshold={self._threshold}"
+        return s + ")"
 
 
 #
@@ -1210,6 +1286,10 @@ if __name__ == "__main__":
             with self.assertRaises(TypeError):
                 _ = PIDPlus(Kp=2, modifiers=ramper)
 
+        def test_sprampthreshold(self):
+            # test threshold concept
+            pass
+
         def test_windup(self):
             windup_limit = 2.25
             dt = 0.1
@@ -1263,7 +1343,7 @@ if __name__ == "__main__":
             else:
                 raise ValueError(f"never got down to {wlo}")
 
-        def test_readonlyvars(self):
+        def test_readonly(self):
             class Foo(PIDModifier):
                 def PH_modify_terms(self, event):
                     event.d = 17
@@ -1293,8 +1373,11 @@ if __name__ == "__main__":
             self.assertEqual(e2.e, 2)
 
         def test_pidreadonly(self):
-            # .pid should be readonly even if RW_VARS was '*'
-            ebozo = PIDHookBaseTerms(pid='bozo', e=1)
+            class NothingReadonly(_PIDHookEvent):
+                READONLY = None
+
+            # .pid is always readonly
+            ebozo = NothingReadonly(pid='bozo', e=1)
             with self.assertRaises(TypeError):
                 ebozo.pid = 'bonzo'
             self.assertEqual(ebozo.pid, 'bozo')
@@ -1363,6 +1446,51 @@ if __name__ == "__main__":
             u = z.pid(0, dt=0.01)
             self.assertEqual(z.setpoint, 50)
             self.assertEqual(u, 50 / 100)
+
+        def test_history_sizing(self):
+            # test the various 'n'/resize/since features of PIDHistory
+
+            # simple test of 'n'
+            h = PIDHistory(1)
+            z = PIDPlus(modifiers=h)
+            z.setpoint = 5             # cause a SetpointChange
+            self.assertEqual(h.history[0], h.history[-1])
+            self.assertTrue(isinstance(h.history[0], PIDHookSetpointChange))
+
+            # simple test of resize; start infinite, do 100 setpoints,
+            # resize to 10, see if it's the last 10 setpoints saved.
+            h = PIDHistory(None)
+            z = PIDPlus(modifiers=h)
+
+            # set the setpoint to something that won't be used below
+            z.setpoint = 867.5309
+
+            # get the current last item (the SetpointChange just done)
+            last = h.history[-1]
+
+            # now do a bunch of setpoints...
+            maxsetpoints = 100
+            saveonly = 10
+            for i in range(maxsetpoints):
+                z.setpoint = i
+
+            # and see if all 100 are there (this is also a test of "since")
+            for i, e in enumerate(h.since(last)):
+                self.assertEqual(e.sp_set, i)
+
+            # resize to the new size...
+            h.resize(saveonly)
+
+            # and now it should only be the last 10 in there
+            for i, e in enumerate(h.history):
+                self.assertEqual(e.sp_set, i + maxsetpoints - saveonly)
+
+            # really shouldn't do this kind of hack, supplying bogus events
+            # as the 'preserve' events, but test it anyway...
+            hackevents = 'abcde'       # each char will be a new 'event'
+            h.resize(saveonly, preserve=hackevents)
+            for i, e in enumerate(h.history):
+                self.assertEqual(hackevents[i], e)
 
         def test_history_copy(self):
             # this in particular tests that the history captures the
