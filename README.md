@@ -84,9 +84,9 @@ The simple PID algorithm works well enough in most use cases. For others, the cl
 
 The following features are available as `PIDPlus` modifiers:
 
-- **Setpoint Ramping**: Any time *object*.setpoint is changed, instead of the change taking effect immediately it will be ramped-in over a configurable time period. In applications where the setpoint does indeed change midstream, this may be useful in reducing or eliminating abrupt control change behavior (especially overshoot).
+- **Setpoint Ramping**: This converts an abrupt setpoint change into a series of smaller setpoint changes interpolated (i.e., "ramped") over a configurable time period. Can be helpful in some types of controlled systems.
 
-- **Integration windup protection**: A large setpoint change (or other dynamic conditions) can cause excessive accumulation in the integration term. The excess will persist (and distort control output) until there has been sufficient cumulative time spent with an opposite error. Among other problems, this can cause overshoot and a slower return to the commanded setpoint. This excessive accumulation is (sometimes) called *integral windup*. Windup protection allows an absolute limit to be set on the integration term value, thus limiting the amount of windup possible. Setting this value correctly requires application-specific knowledge; in particular note that low values will limit the control authority range of the integration term (this is both the point, and the peril, of windup limiting).
+- **Integration windup protection**: A large setpoint change (or other dynamic conditions) that creates a large error term can cause excessive accumulation in the integration term. The excess will persist (and distort control output) until there has been sufficient cumulative time spent with an opposite error. Among other problems, this can cause overshoot and a slower return to the commanded setpoint. This excessive accumulation is (sometimes) called *integral windup*. Windup protection allows an absolute limit to be set on the integration term value, thus limiting the amount of windup possible. Setting this value correctly requires application-specific knowledge; in particular note that low values will limit the control authority range of the integration term (this is both the point, and the peril, of windup limiting).
 
 - **Integration reset and pause**: When the setpoint is changed, it may be desirable to reset the integration term back to zero, and optionally cause the integration accumulation to pause for a little while for the other controls to settle into a steadier state. This is another approach to mitigating the same type of problem that windup protection attempts to solve. This solution is close to emulating a new cold-start of the controller with a new setpoint. Note that in some systems the integration term is, in effect, a dynamically-discovered "bias" value (minimum control value needed for equilibrium). In such systems using this modifier can make things worse, not better; obviously this is application-specific.
 
@@ -98,26 +98,32 @@ The following features are available as `PIDPlus` modifiers:
 
 ## Using PIDPlus with Modifiers
 
-To create a PIDPlus control object, first a list of PIDModifier objects must be set up.  Each PIDModifier object represents a specific behavior modification with specific parameters. These objects are then passed in to PIDPlus along with the standard PID parameters (Kp/Kd/Ki).
+To create a PIDPlus control object, begin by creating a sequence (usually list or tuple) of PIDModifier objects desired. Each PIDModifier object represents a specific behavior modification with specific parameters. These objects are then passed in to PIDPlus along with the standard PID parameters (Kp/Kd/Ki).
 
 Details shown below, but first an example:
 
     from pid import PIDPlus, PIDHistory
     
-    # initialize a PIDHistory 'modifier' with 1000-entry lookback
-    h = PIDHistory(1000)
+    # initialize a PIDHistory 'modifier' with 100-entry lookback
+    h = PIDHistory(100)
     
-    # now make the PIDPlus with this modifier
-    # Note in this case there is only one modifier and it can
-    # be supplied directly; if there were multiple they can
-    # instead be supplied as 'modifiers=[modifier_1, modifier_2, etc]'
-    z = PIDPlus(Kp=foo, Ki=bar, Kd=baz, modifiers=h)
+    # now make a modifier list (in this case there is only one modifier)
+    mods = [ h ]
+
+    # make the PIDPlus
+    z = PIDPlus(Kp=foo, Ki=bar, Kd=baz, modifiers=mods)
 
     ... do the normal things with z
 
     # The history collected by PIDHistory is available as an
     # attribute of the PIDHistory object:
     print(h.history)              # for example, to see the record
+
+As a convenience, if there is only one modifier it can be supplied by itself instead of being in a list:
+
+    h = PIDHistory(100)
+    z = PIDPlus(Kp=foo, Ki=bar, Kd=baz, modifiers=h)
+
 
 The specific PIDModifier class names and __init__ signatures are:
 
@@ -129,6 +135,42 @@ Example usage - to cause all modifications of z.setpoint to be ramped in over a 
 
 and m must (of course) be given to PIDPlus in the modifiers list.
 
+By default, during the ramp the value of z.setpoint will be seen to change as the setpoint is being ramped in. For example:
+
+    z = PIDPlus(Kp=1, modifiers=SetpointRamp(5))
+    z.setpoint = 4.0             # starts ramping from zero
+    for i in range(5):
+        cv = z.pid(pv=0, dt=1)
+        print(f"{cv=}, {z.setpoint=}")
+
+This will print:
+
+    cv=0.8, z.setpoint=0.8
+    cv=1.6, z.setpoint=1.6
+    cv=2.4, z.setpoint=2.4
+    cv=3.2, z.setpoint=3.2
+    cv=4.0, z.setpoint=4.0
+
+which shows the setpoint ramping 1/5th of the way on each call (dt=1) and the returned control variable clearly being calculated off of that ramping setpoint (Kp=1).
+
+For most use-cases this is the best way to handle setpoint ramping as it makes the ramping explicitly visible. However, it is possible to hide the ramping with `hidddenramp=True`:
+
+    z = PIDPlus(Kp=1, modifiers=SetpointRamp(5, hiddenramp=True))
+    z.setpoint = 4.0             # starts ramping from zero
+    for i in range(5):
+        cv = z.pid(pv=0, dt=1)
+        print(f"{cv=}, {z.setpoint=}")
+
+This will print:
+
+    cv=0.8, z.setpoint=4.0
+    cv=1.6, z.setpoint=4.0
+    cv=2.4, z.setpoint=4.0
+    cv=3.2, z.setpoint=4.0
+    cv=4.0, z.setpoint=4.0
+
+showing that the control variable is still being computed from a ramping setpoint, but hides that ramping and always shows `z.setpoint` at the final target value. Whether this is a good idea or not is application-specific, especially regarding how other modifiers (if any) may behave with respect to hidden or not hidden ramping.
+
 It is possible to change the ramp time in an active controller by changing the `secs` attribute:
 
     m.secs = 2.5
@@ -136,6 +178,8 @@ It is possible to change the ramp time in an active controller by changing the `
 would change the ramp time to 2.5 seconds. If a ramping is already in progress when this is done, a new ramp is calculated from the then-current (partly-ramped) setpoint to the already-established target, at a rate dictated by the new ramp time. If the new ramp time is zero, the setpoint is immediately changed to that target.
 
 NOTE that the ramp time is defined in terms of `pid()` calls and the `dt` argument. In other words, "1.5 seconds" doesn't mean, necessarily, 1.5 seconds of real time. It means *over a series of `pid()` calls until the sum of the `dt` values provided in those calls reaches or exceeds 1.5*.
+
+It may be desirable to skip ramping for small setpoint changes. The keyword-only argument `threshold` allows for this. It defines an amount of setpoint change (in either positive or negative direction) that will be allowed immediately rather than ramped. The default value of `threshold` is zero, meaning all changes are ramped. Note that `threshold` does not affect the setpoint changes made by SetpointRamp itself (which operates "behind the scene" so that its own changes to the setpoint are, of course, never recursively ramped).
 
 ### Windup Protection
 
@@ -145,9 +189,20 @@ To limit the (unweighted!) integration term to +/- x:
 
 To limit the (unweighted!) integration term to a closed asymmetric range [lo, hi]:
 
-    m = I_Windup((lo, hi))         # NOTE: one tuple arg, not two args
+    m = I_Windup(lo, hi)
 
-Note that the order in the tuple does not matter; the lower value will be the low limit and the higher value will be the high limit.
+It is also allowed to specify one argument, a tuple:
+
+    m = I_Windup((lo, hi))
+
+Note that the order of the two values (`lo` and `hi`) does not matter; they will be sorted so that the smaller value will be the low limit and the larger value will be the high limit.
+
+In normal use cases the two limits should have opposite signs; however, this is not enforced. If, for example:
+
+    m = I_Windup(6, 9)
+
+then at startup time unless the first pid() call already gets the integration value all the way up to 6, the integration value will jump up to 6. It works analogously if both limits are negative.
+
 
 ### Integration reset and delay on setpoint change
 
@@ -163,13 +218,46 @@ NOTE: There is no way to ONLY implement a delay, without a reset. Though, of cou
 
 ### History
 
-This was already shown in the introductory example. The PIDHistory modifier keeps a `deque` (i.e, a FIFO list) of the PIDHookEvent stream which encapsulates all the internal computations and state changes of the PID system. The objects in this record have repr implementations that will print all the relevant variables so these can be sent directly to a logger, for example, if so desired.
+The PIDHistory modifier keeps a `deque` (i.e, a FIFO list) of PIDHookEvents.
 
-To instantiate a history modifier to track the most recent 1000 entries:
+    m = PIDHistory()
+    z = PIDPlus(modifiers=m)
+    for e in m.history:
+        print(e)
 
-    m = PIDHistory(1000)
+will print:
 
-and the entries will be found in m.history as a `deque` (which could potentially have fewer than N entries if it hasn't been fully populated yet).
+    PIDHookAttached()
+    PIDHookInitialConditions(setpoint=0, pv=0)
+
+Note that str() rebpresentations of events are simplified; try this same example using `print(f"{e!r}")` for more event object details.
+
+The maximum events stored in the FIFO `deque` defaults to 1000 but can be given as an argument:
+
+    m = PIDHistory(100)
+
+will limit the deque to 100 entries.
+
+Entries are available via the `.history` attribute, which is a sequence. The zeroth element is the oldest.
+
+It is possible, but likely a bad idea, to keep infinite history via None:
+
+    m = PIDHistory(None)
+
+in which case the .history sequence will grow without bound.
+
+A `PIDHistory` also counts event occurrences, by handlername(). The counts are in the `.eventcounts` attribute:
+
+    m = PIDHistory()
+    z = PIDPlus(modifiers=m)
+    print(m.eventcounts)
+
+will print:
+
+    Counter({'PH_attached': 1, 'PH_initial_conditions': 1})
+
+showing the count of events (1 `PH_attached` and 1 `PH_initial_conditions`) that occur simply from creating the PIDPlus object.
+
 
 ### Bang Bang
 
@@ -242,9 +330,9 @@ This is about 0.3 microseconds per `pid()` call.
 
     % python3 -mtimeit \
       -s'from pid import PIDPlus; z = PIDPlus()' 'z.pid(0, dt=0.01)'
-    20000 loops, best of 5: 11.9 usec per loop
+    20000 loops, best of 5: 13.2 usec per loop
 
-Although the no-modifier `PIDPlus` could be said to be roughly 40 times slower than the corresponding `PID`, the total overhead of roughly 12 microseconds per iteration seems unlikely to be significant overhead in the context of any system that can be pragmatically controlled via a python program.
+Although the no-modifier `PIDPlus` could be said to be roughly 45 times slower than the corresponding `PID`, the total overhead of roughly 13 microseconds per iteration seems unlikely to be significant overhead in the context of any system that can be pragmatically controlled via a python program.
 
 Adding a PIDHistory, which is one of the more expensive modifiers (as it responds to ALL events):
 
@@ -252,9 +340,9 @@ Adding a PIDHistory, which is one of the more expensive modifiers (as it respond
     % python3 -mtimeit \
        -s'from pid import PIDPlus, PIDHistory' \
        -s'h = PIDHistory(); z=PIDPlus(modifiers=h)' 'z.pid(0, dt=0.01)' 
-    20000 loops, best of 5: 16.6 usec per loop
+    20000 loops, best of 5: 18.1 usec per loop
 
-indicates roughly 4usec additional overhead per modifier added.
+indicates roughly 5usec additional overhead per modifier added.
 
 ## Writing a PIDModifier
 
@@ -456,7 +544,6 @@ Notes:
 - It is legal, but almost certainly questionable, for a PH_hook_stopped handler to raise HookStop. This does not cause infinite recursion because this new PIDHookHookStopped event will be sent only to the modifiers that come after the one (recursively) raising HookStop. Each layer of such recursion shortens the remaining modifiers list by 1; therefore there is no infinite recursion.
 
 - Similarly, it is legal, but almost certainly questionable, for a PH_hook_stopped handler to try to circumvent the HookStop by peering into the `event` attribute; note that because recursion is allowed such code needs to be able to follow the entire event.event.event... chain until it gets down to the original (i.e., non-recursive) event.
-
 
 ## Shared Modifiers
 Some modifiers can be meaningfully shared among multiple PIDPlus controllers, because they have no implicit/internal state. A good example is `I_Windup` which simply performs a (stateless) calculation on the integration value it is supplied via a notification event.
