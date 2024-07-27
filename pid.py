@@ -887,10 +887,12 @@ class SetpointRamp(PIDModifier):
         # NO-OP conditions:
         #   ramp parameter zero,
         #   no change in setpoint
-        #   change is below threshold
         if self._ramptime == 0 or event.sp_set == self._target_sp:
             return
+
+        # if the change is within threshold, set immediate, cancel ramping
         if abs(event.sp_set - self.pid.setpoint) < self._threshold:
+            self._noramp(setpoint=event.sp_set)
             return
 
         self._start_sp = event.sp_prev
@@ -1288,7 +1290,36 @@ if __name__ == "__main__":
 
         def test_sprampthreshold(self):
             # test threshold concept
-            pass
+            threshold = 0.5
+            setpoint = 10 * threshold
+            ramptime = 5
+            dt = 1
+
+            for smallchange in (-threshold / 2,
+                                threshold / 2,
+                                # these values really just test the test
+                                -threshold / 123456,
+                                threshold / 123456):
+                with self.subTest(smallchange=smallchange):
+                    r = SetpointRamp(ramptime, threshold=threshold)
+                    z = PIDPlus(Kp=1, modifiers=r)
+                    z.setpoint = setpoint
+                    cv = z.pid(0, dt=dt)
+                    ramped = (dt / ramptime) * setpoint
+                    self.assertTrue(math.isclose(cv, ramped))
+                    # because Kp was 1 these should be equal
+                    self.assertEqual(z.setpoint, cv)
+
+                    # now make a 'smallchange' which should also have
+                    # the side-effect of cancelling the in-progress ramp
+                    newsetpoint = z.setpoint + smallchange
+                    z.setpoint = newsetpoint
+                    cv = z.pid(0, dt=dt)
+                    self.assertEqual(cv, newsetpoint)
+                    self.assertEqual(z.setpoint, newsetpoint)
+
+                    # and the next z.pid call shouldn't be ramping anything
+                    self.assertEqual(z.pid(0, dt=dt), cv)
 
         def test_windup(self):
             windup_limit = 2.25
