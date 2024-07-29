@@ -627,25 +627,32 @@ class HookStop(Exception):
 # ----------------------------
 
 class PIDModifier:
-    """Base, no-op, class for the 'modifiers' used in a PIDPlus."""
+    """Base class for the 'modifiers' used in a PIDPlus."""
+
+    # It's important this base class have no explicit handlers so that
+    # a subclass PH_default will get to see everything it should see.
+    #
+    # So, rather than this being a default PH_attached handler that a
+    # subclass could override, it is named attached_once_check. A
+    # subclass can do PH_attached = PIDModifier.attached_once_check
+    # if it wants this as a PH_attached method, or it can of course
+    # also call it from its own PH_attached method via super().
+    #
+    # This disallows more than one PH_attached in all circumstances.
+    #
+    def attached_once_check(self, event):
+        """Disallow more than one PH_attached in any circumstance."""
+        try:
+            if self.__attached:      # effectively just "if hasattr"
+                raise TypeError(
+                    f"multiple attachment attempted: " +
+                    f"'{self}', {self.__attached}")
+        except AttributeError:
+            self.__attached = event
 
     def PH_default(self, event):
         """Default (no-op) handler for unhandled event types"""
         pass
-
-    # Subclasses that want to limit themselves to being attached to
-    # exactly one PIDPlus controller can put this line in their class body:
-    #      PH_attached = PIDModifier._pid_limit_1
-    # or, alternatively, invoke this within their own PH_attached handler.
-    #
-    # NOTE: Using this establishes a .pid attribute, which is available
-    #       for use by the subclass (including, meh, deleting it to reset!)
-    def _pid_limit_1(self, event):
-        try:
-            if self.pid != event.pid:
-                raise TypeError(f"multiple attachment attempted: '{self}'")
-        except AttributeError:
-            self.pid = event.pid
 
 
 class PIDHistory(PIDModifier):
@@ -793,7 +800,7 @@ class I_SetpointReset(PIDModifier):
     """Reset integration, with optional pause, when setpoint changes."""
 
     # This is a stateful modifier and cannot be shared among PIDs
-    PH_attached = PIDModifier._pid_limit_1
+    PH_attached = PIDModifier.attached_once_check
 
     def __init__(self, secs, *args, **kwargs):
         """Resets integration on setpoint change, and pause it 'secs'.
@@ -842,6 +849,11 @@ class I_SetpointReset(PIDModifier):
 class SetpointRamp(PIDModifier):
     """Add setpoint ramping (smoothing out setpoint changes) to a PID"""
 
+    # This is a stateful modifier and cannot be shared among PIDs
+    def PH_attached(self, event):
+        self.attached_once_check(event)       # from the base class
+        self.pid = event.pid
+
     def __init__(self, secs, *args, hiddenramp=False, threshold=0, **kwargs):
         """Smooth (i.e., ramp) setpoint changes over 'secs' seconds.
 
@@ -883,10 +895,6 @@ class SetpointRamp(PIDModifier):
             totaldelta = (self._target_sp - self._start_sp)
             return self._clamper(self._start_sp + (totaldelta * pcttime))
 
-    # Enforce one PIDPlus per SetpointRamp (because stateful)
-    # NOTE: This also establishes the .pid attribute (at attach time)
-    PH_attached = PIDModifier._pid_limit_1
-
     # property because if it changes the ramping may have to be adjusted
     @property
     def secs(self):
@@ -926,7 +934,7 @@ class SetpointRamp(PIDModifier):
             return
 
         # if the change is within threshold, set immediate, cancel ramping
-        if abs(event.sp_set - self.pid.setpoint) < self._threshold:
+        if abs(event.sp_set - event.pid.setpoint) < self._threshold:
             self._noramp(setpoint=event.sp_set)
             return
 
@@ -993,7 +1001,7 @@ class SetpointRamp(PIDModifier):
             # supply an alternate 'e' making use of the ramping setpoint
             # rather than the public .setpoint
             if self._hiddenramp:
-                event.e = self._ramped() - self.pid.pv
+                event.e = self._ramped() - event.pid.pv
 
     def __repr__(self):
         s = f"{self.__class__.__name__}({self._ramptime}"
@@ -1066,8 +1074,8 @@ class BangBang(PIDModifier):
 class D_DeltaE(PIDModifier):
     """Make D term use delta-e rather than delta-pv."""
 
-    # can't re-use on multiple because track previous_e here
-    PH_attached = PIDModifier._pid_limit_1
+    # This is a stateful modifier and cannot be shared among PIDs
+    PH_attached = PIDModifier.attached_once_check
 
     def __init__(self, /, *, kickfilter=False):
         """Modifier: Make D term use delta-e rather than delta-pv.
@@ -1317,7 +1325,6 @@ if __name__ == "__main__":
                 self.assertTrue(math.isclose(p.setpoint, 100))
 
         def test_sprampmonogamous(self):
-            # this is really a test of _pid_limit_1 but hey, why not.
             ramper = SetpointRamp(17)
             z1 = PIDPlus(Kp=1, modifiers=ramper)
             with self.assertRaises(TypeError):
