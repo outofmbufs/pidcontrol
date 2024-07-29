@@ -131,14 +131,15 @@ The specific PIDModifier class names and __init__ signatures are:
 
 Example usage - to cause all modifications of z.setpoint to be ramped in over a period of 1.5 seconds:
 
-    m = SetpointRamp(1.5)
+    ramper = SetpointRamp(1.5)
 
-and m must (of course) be given to PIDPlus in the modifiers list.
+and `ramper` must (of course) be given to PIDPlus in the modifiers list.
 
 By default, during the ramp the value of z.setpoint will be seen to change as the setpoint is being ramped in. For example:
 
     z = PIDPlus(Kp=1, modifiers=SetpointRamp(5))
-    z.setpoint = 4.0             # starts ramping from zero
+    # the initial setpoint = 0, so this starts ramping from there
+    z.setpoint = 4.0
     for i in range(5):
         cv = z.pid(pv=0, dt=1)
         print(f"{cv=}, {z.setpoint=}")
@@ -173,7 +174,7 @@ showing that the control variable is still being computed from a ramping setpoin
 
 It is possible to change the ramp time in an active controller by changing the `secs` attribute:
 
-    m.secs = 2.5
+    ramper.secs = 2.5
 
 would change the ramp time to 2.5 seconds. If a ramping is already in progress when this is done, a new ramp is calculated from the then-current (partly-ramped) setpoint to the already-established target, at a rate dictated by the new ramp time. If the new ramp time is zero, the setpoint is immediately changed to that target.
 
@@ -185,21 +186,21 @@ It may be desirable to skip ramping for small setpoint changes. The keyword-only
 
 To limit the (unweighted!) integration term to +/- x:
 
-    m = I_Windup(x)
+    w = I_Windup(x)
 
 To limit the (unweighted!) integration term to a closed asymmetric range [lo, hi]:
 
-    m = I_Windup(lo, hi)
+    w = I_Windup(lo, hi)
 
 It is also allowed to specify one argument, a tuple:
 
-    m = I_Windup((lo, hi))
+    w = I_Windup((lo, hi))
 
 Note that the order of the two values (`lo` and `hi`) does not matter; they will be sorted so that the smaller value will be the low limit and the larger value will be the high limit.
 
 In normal use cases the two limits should have opposite signs; however, this is not enforced. If, for example:
 
-    m = I_Windup(6, 9)
+    w = I_Windup(6, 9)
 
 then at startup time unless the first pid() call already gets the integration value all the way up to 6, the integration value will jump up to 6. It works analogously if both limits are negative.
 
@@ -230,7 +231,7 @@ will print:
     PIDHookAttached()
     PIDHookInitialConditions(setpoint=0, pv=0)
 
-Note that str() rebpresentations of events are simplified; try this same example using `print(f"{e!r}")` for more event object details.
+Note that str() representations of events are simplified; try this same example using `print(f"{e!r}")` for more event object details.
 
 The maximum events stored in the FIFO `deque` defaults to 1000 but can be given as an argument:
 
@@ -256,7 +257,7 @@ will print:
 
     Counter({'PH_attached': 1, 'PH_initial_conditions': 1})
 
-showing the count of events (1 `PH_attached` and 1 `PH_initial_conditions`) that occur simply from creating the PIDPlus object.
+showing the count of events (1 `PH_attached` and 1 `PH_initial_conditions`) that occur simply from creating the PIDPlus object. Note that these counts are for events _generated_ regardless of whether any modifier had a handler for them.
 
 
 ### Bang Bang
@@ -346,96 +347,187 @@ indicates roughly 5usec additional overhead per modifier added.
 
 ## Writing a PIDModifier
 
-A custom PIDModifier interacts with one or more PIDHookEvent notifications by providing a handler method for that notification. There are 7 PIDHookEvent types, each with a specific notification method name as noted here:
+A custom PIDModifier interacts with one or more PIDHookEvent event notifications by providing a handler method with a specific name (as shown below) for that notification.
 
-- PIDHookAttached: generated at the **end** of PIDPlus.__init__ for each modifier attached to that PIDPlus. PIDModifier method name: `PH_attached` . The significance of this being "at the end of" PIDPlus.__init__ is that the PIDPlus will be fully-initialized when this notification happens.
+The event classes and their corresponding handler names are:
 
-- PIDHookInitialConditions: generated when the 'initial_conditions()' method is invoked on a PIDPlus object. PIDModifier method name: `PH_initial_conditions` .
+| Event Class              | Handler Method Name   |
+| :----------------------- | :-------------------- |
+| PIDHookAttached          | PH_attached           |
+| PIDHookInitialConditions | PH_initial_conditions |
+| PIDHookSetpointChange    | PH_setpoint_change    |
+| PIDHookBaseTerms         | PH_base_terms         |
+| PIDHookModifyTerms       | PH_modify_terms       |
+| PIDHookCalculateU        | PH_calculate_u        |
+| PIDHookHookStopped       | PH_hook_stopped       |
+| * (see discussion) *     | PH_default            |
 
-- PIDHookSetpointChange: generated when the setpoint attribute is set on a PIDPlus object. PIDModifier method name: `PH_setpoint_change` .
 
-- PIDHookBaseTerms, PIDHookModifyTerms, PIDHookCalculateU: generated at three different stages of the PID calculation. These three spots offer different ways of modifying the PID control calculation. PIDModifier method names: `PH_base_terms`, `PH_modify_terms`, `PH_calculate_u`.
+In general a modifier should be a subclass of PIDModifier and provide methods `PH_something` for the names corresponding to events it wants to handle. The method signatures are always:
 
-- PIDHookHookStopped: generated when any PIDModifier raises HookStop to prevent further propagation of an individual PIDHook event. This at least lets modifiers later in the list know that they were cut off from an event. PIDModifier method name: `PH_hook_stopped`.
+    def PH_foo(self, event):
+        code handling the foo event (a PIDHookFoo object) goes here
 
-In addition to the specific method names mentioned above,  each notification subclass defines its own 'event' object which will be passed to those handler methods. The specific event objects will be described later.
+For example:
 
-To create a new modification type, subclass PIDModifier and supply a handler for every event of interest. For example, to create a PIDModifier that will interact with PIDHookSetpointChange events and PIDHookModifyTerms events:
-
-    class ExampleModification(PIDModifier):
+    class ExampleModifier(PIDModifier):
         def PH_setpoint_change(self, event):
-            print(f"setpoint_change event: {event}")
+            print(event)
 
-        def PH_modify_terms(self, event):
-            print(f"modify_terms event: {event}")
+    z = PIDPlus(modifiers=ExampleModifier())
+    z.setpoint = 7
 
-A modification can declare its own __init__ method if it needs additional parameters. Best practice includes using *args/**kwargs and super() to continue the __init__ calls up the subclass chain. So, as a trivial example, to add a 'foo' parameter to the ExampleModification:
+will print:
 
-    class ExampleModification(PIDModifier):
+    PIDHookSetpointChange(sp_now=None, sp_prev=0, sp_set=7)
+
+A modification can declare its own `__init__` method if it needs additional parameters. Best practice includes using *args/**kwargs and super() to continue the `__init__` calls up the subclass chain. So, as a trivial example, to add a 'foo' parameter to the ExampleModifier shown above:
+
+    class ExampleModifierFoo(PIDModifier):
         def __init__(self, foo, *args, **kwargs):
             super().__init__(*args, **kwargs)
             self.foo = foo
 
         def PH_setpoint_change(self, event):
-            print(f"setpoint_change event: {event}, foo: {foo}")
+            print(f"'{self.foo}' : {event}")
 
-        def PH_modify_terms(self, event):
-            print(f"modify_terms event: {event}, foo: {foo}")
+    z = PIDPlus(modifiers=ExampleModifierFoo('bozo'))
+    z.setpoint = 7
 
-which is the same as the first example but now includes a 'foo' parameter that presumably would be used for something in a real example.
+and this will print:
 
-A PIDModifier can also define a catch-all handler, called `PH_default` . It receives notifications this PIDModifier doesn't otherwise handle explicitly. As an example, here is a simplified PIDHistory modifier:
+    'bozo' : PIDHookSetpointChange(sp_now=None, sp_prev=0, sp_set=7)
 
-    class PIDHistory(PIDModifier):
-        def __init__(self, n, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            self.history = deque([], n)
+**PH_default**
 
-        # this _default method gets all events and stores them
+A PIDModifier subclass can also choose to handle _all_ events by providing a `PH_default` method. NOTE: The `PH_default` method will only see events for events the subclass does not have an explicit handler for.
+
+Thus, for example:
+
+    class ExampleTwo(PIDModifier):
+        def PH_setpoint_change(self, event):
+            print(f"In PH_setpoint_change, got: {event.__class__.__name__}")
+
         def PH_default(self, event):
-            self.history.append(copy.copy(event))
+            print(f"In PH_default, got: {event.__class__.__name__}")
+    z = PIDPlus(modifiers=ExampleTwo())
+    z.setpoint = 7
 
-This works by creating a deque (from collections) in the PIDHistory object, and simply entering (a copy of) every event (caught by `PH_default`) into it. The reason for copying the event is because modifiers further down the chain can alter `event` values. For the purpose of the history modifier the desired semantic is to record the values at the time they were seen by the history module; hence the event is copied.
+will print:
 
-As will be described next, each event contains its own set of attributes specific to that event. Some of the attributes are read-only, emphasizing that changing them will have no effect on the PIDPlus operation. Others are read-write and changing them will have event-specific semantics as discussed with each event below. Modifiers _can_ set additional attributes in an event, though this might be a questionable practice. Such additional attributes will be read/write but (of course) will be ignored by the built-in machinery.
+    In PH_default, got: PIDHookAttached
+    In PH_default, got: PIDHookInitialConditions
+    In PH_setpoint_change, got: PIDHookSetpointChange
 
-The specific events, and associated semantics, for each PIDHook event are:
+The `ExampleTwo` shows that two events, `PIDHookAttached` and `PIDHookInitialConditions`, are generated just by instantating a `PIDPlus`.
 
-**PIDHookAttached**:
-Event is generated at the very end of PIDPlus initialization, so the underlying PIDPlus object is "ready to go" when this notification is received. See "Shared Modifiers" discussion for one way to use this event.
+**Exception: Hookstop**
+
+A handler can raise an exception, `HookStop`, to prevent handlers that come after it from seeing an event. See the `PIDHookHookStopped` description for more details on how this works.
+
+**Event Attributes**
+
+In these next sections each individual event and the semantics of what a handler can do with them are shown. In these descriptions, event attributes that are noted as READ-ONLY cannot be altered (attempting to modify them will raise an exception). Attributes that are READ-WRITE indicate ways that an event handler can alter the system semantics as described in each event.
+
+Modifiers are also allowed to set entirely new attributes in an event. These will, of course, be ignored by the framework itself so is often pointless. However there are two ways it might be useful:
+- During a `pid()` calculation there are three events generated: `PIDHookBaseTerms`, `PIDHookModifyTerms`, and `PIDHookCalculateU`. Any extra attributes that got added into the `PIDHookBaseTerms` will be copied to the `PIDHookModifyTerms` event, and similarly they (and any additional new attributes) will be copied to the `PIDHookCalculateU` event.
+
+- If for some reason it is desirable to pass information to handlers that are later in the modifiers list. This might be helpful, for example, to allow internal attributes to propagate to the later PIDHistory modifier for logging/debugging.
+
+As an example of setting attributes for logging purposes:
+
+
+    class ExampleModifierFoo2(PIDModifier):
+        def __init__(self, foo, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.foo = foo
+
+        def PH_setpoint_change(self, event):
+            # instead of: print(f"'{self.foo}' : {event}")
+            # this does this:
+            event.xyz = self.foo
+
+    h = PIDHistory()
+    f = ExampleModifierFoo2('bozo')
+    z = PIDPlus(modifiers=[f, h])
+    z.setpoint = 7
+    print(h.history[-1])   # print the last (newest) entry
+
+this will print
+
+    PIDHookSetpointChange(sp_now=None, sp_prev=0, sp_set=7, xyz=bozo)
+
+**Details of each PIDHookEvent subclass and handlers**
+
+Each event object and its semantics are described below.
+
+### PIDHookAttached (handler method: PH_attached)
+
+Generated **_DURING_** PIDPlus.__init__ for each modifier attached to that PIDPlus.
 
 HANDLER SIGNATURE: `PH_attached(self, event)`
 
 READ-ONLY ATTRIBUTES:
-- `pid` -- the PIDPlus object
+- `pid` -- the PIDPlus object. CAUTION: NOT FULLY INITAILIZED AT THIS POINT.
 
-**PIDHookInitialConditions**:
-Event is generated AFTER the `initial_conditions()` method has completed modifying the PIDPlus object. The intent of this event is to allow PIDModifier implementations a hook for (re)initializing their own state if the application uses the `initial_conditions` method to change pv and/or the setpoint.
+This notification happens before the PIDPlus object is fully set up; handlers should not attempt to look into the `event.pid` object. They can, of course, look **at** `event.pid` itself which is the reason for this notification.
+
+The base PIDModifier class provides a method, `attached_once_check` that is useful for modifiers that need to limit themselves to one attachment (usually because they have pid-specific state); it will raise a TypeError if called more than once per modifier object.
+
+Thus a modifier can limit itself to one pid like this:
+
+    class OnlyOneAttach(PIDModifier):
+        def PH_attached(self, event):
+            # raises TypeError if called more than once
+            self.attached_once_check(event)
+
+    m = OnlyOneAttach()
+    z1 = PIDPlus(modifiers=m)
+    z2 = PIDPlus(modifiers=m)
+
+will result in an exception:
+
+    TypeError: multiple attachment attempted: '<__main__.OnlyOne>'
+
+If the modifier itself doesn't need to do anything other than limit attachment it can simply set `PH_attached` to the attached_once_check method directly:
+
+    class OnlyOne(PIDModifier):
+        PH_attached = PIDModifier.attached_once_check
+
+this will produce the same result as the explicit `PH_attached` handler shown above.
+
+### PIDHookInitialConditions (handler method: PH_initial_conditions)
+
+Generated when the `initial_conditions` method is invoked on a PIDPlus object.
 
 HANDLER SIGNATURE: `PH_initial_conditions(self, event)`
 
 READ-ONLY ATTRIBUTES:
 - `pid` -- the PIDPlus object
 - `setpoint` -- the `setpoint` argument specified in the corresponding `initial_conditions()` method invocation. NOTE: Can be None (meaning: no setpoint change).
-- `pv` -- the `pv`argument; can be None.
+- `pv` -- the `pv` argument; can be None.
 
-As noted above, this event is generated **after** the initial_conditions method has modified the `pid` object. 
+As noted above, this event is generated **after** the initial_conditions method has modified the `pid` object. If it makes sense to allow a modifier to be "reset" midstream, the initializations necessary to start afresh should go in a `PH_initial_conditions` handler.
 
-**PIDHookSetpointChange**:
-Event is generated BEFORE any modifications in the underlying PIDPlus object occur. This gives the handler the opportunity to affect the setpoint change.
+### PIDHookSetpointChange: (handler method: PH_setpoint_change)
+
+Generated when the setpoint attribute is set on a PIDPlus object. PIDModifier method name: `PH_setpoint_change` .
+
+NOTE: This event is NOT generated if the setpoint change happens as part of an initial_conditions() call.
+
+This event is generated BEFORE any modifications in the underlying PIDPlus object occur. This gives the handler the opportunity to affect the setpoint change as described with the attributes below.
 
 There is one read/write attribute and the rest are read-only.
 
 HANDLER SIGNATURE: `PH_setpoint_change(self, event)`
 
 READ-WRITE ATTRIBUTES:
-- `sp_now` -- If the handler sets this attribute to something other than None (its default), then this value is used to set the setpoint.
+- `sp_now` -- If the handler sets this attribute to something other than None (its default), then this value is used to set the setpoint. 
 
 READ-ONLY ATTRIBUTES:
 - `pid` -- the PIDPlus object
 - `sp_prev` -- the setpoint value prior to any modification.
 - `sp_set` -- the setpoint value that was requested to be set by the application (see discussion below). 
-
 
 As noted above, this event is generate **before** the assignment to the setpoint attribute. This allows handlers to change the value that gets assigned, by setting `sp_now` to something other than `sp_set` (`sp_set` itself is read-only)
 
@@ -453,10 +545,8 @@ This would allow users to use "percentages" for the setpoint, e.g.:
 
 This will print 0.50 as the resulting setpoint (whether it is a good idea to implement something like this is up for debate, but it's a simple example). Another example later will show another (better) way to accomplish this without the mismatch between written and read .setpoint values.
 
-**PIDHookBaseTerms**:
-This event is generated at the very beginning of the calculations implied by invoking the `.pid()` method. It contains 1 read-only attribute and 5 read-write attributes:
-
-HANDLER SIGNATURE: `PH_base_terms(self, event)`
+### PIDHookBaseTerms (handler name: PH_base_terms)
+Generated at the start of the calculations related to a `pid()` call.
 
 READ-WRITE ATTRIBUTES:
 - `e` -- the error value to use. Default: None.
@@ -483,7 +573,7 @@ This will print 0.666 even though the control variable would otherwise normally 
 
 Bashing `u` this early in the sequence is unlikely to be useful, but later in the sequence (i.e, in a `PH_compute_u` handler) `u` could be usefully modified.
 
-Given this hook point, here is a better way to implement "setpoint as a percent" ... this modifier sets the `e` value, which is normally computed as:
+Given this hook point, here is a better way to implement "setpoint as a percent"that was shown with `PIDHookSetpointChange`. This modifier sets the `e` value, which is normally computed as:
 
     e = setpoint - pv
 
@@ -495,10 +585,9 @@ but this overrides it as shown, to allow the setpoint to be scaled up by 100 (i.
 
 The underlying PIDPlus code only uses the setpoint in the `e` calculation, so by doing this calculation here the setpoint can be treated as scaled by 100.
 
-**PIDHookModifyTerms**:
-This event occurs immediately after all the base terms are established, whether they were obtained by the built-in calculations or from values provided by `PH_base_terms` handlers.
+### PIDHookModifyTerms (handler name: PH_modify_terms)
 
-HANDLER SIGNATURE: `PH_modify_terms(self, event)`
+This event occurs immediately after all the base terms are established, whether they were obtained by the built-in calculations or from values provided by `PH_base_terms` handlers.
 
 READ-WRITE ATTRIBUTES:
 - `p` -- the current candidate (unweighted) proportional term value. NEVER None.
@@ -514,7 +603,7 @@ Essentially this gives handlers of this event a second swing at the parameters, 
 
 The `e` term can not be modified here as it has already been used by this point.
 
-**PIDHookCalculateU**:
+### PIDHookCalculateU (handler name: PH_calculate_u)
 The last of the three events during `.pid()` calculation. At this stage a candidate `u` value has been computed from the p/i/d terms. Only the `u` value can be overridden at this stage; the remaining attributes are read-only.
 
 HANDLER SIGNATURE: `PH_calculate_u(self, event)`
@@ -529,10 +618,9 @@ READ-ONLY ATTRIBUTES:
 - `i` -- for reference: the (unweighted) integral term value. NEVER None.
 - `d` -- for reference: the (unweighted) derivative term value. NEVER None.
 
-**PIDHookHookStopped**:
-If a PIDModifier raises HookStop then the event in question (the _stopped_ event) will not be propagated to the remaining modifiers further down the list. Instead, a PIDHookHookStopped event will be sent to those modifiers.
+### PIDHookHookStopped (handler name: PH_hook_stopped)
 
-HANDLER SIGNATURE: `PH_hook_stopped(self, event)`
+If a PIDModifier raises HookStop then the event in question (the _stopped_ event) will not be propagated to the remaining modifiers further down the list. Instead, a PIDHookHookStopped event will be sent to those modifiers.
 
 READ-ONLY ATTRIBUTES:
 - `event`-- The _stopped_ event.
@@ -544,19 +632,4 @@ Notes:
 - It is legal, but almost certainly questionable, for a PH_hook_stopped handler to raise HookStop. This does not cause infinite recursion because this new PIDHookHookStopped event will be sent only to the modifiers that come after the one (recursively) raising HookStop. Each layer of such recursion shortens the remaining modifiers list by 1; therefore there is no infinite recursion.
 
 - Similarly, it is legal, but almost certainly questionable, for a PH_hook_stopped handler to try to circumvent the HookStop by peering into the `event` attribute; note that because recursion is allowed such code needs to be able to follow the entire event.event.event... chain until it gets down to the original (i.e., non-recursive) event.
-
-## Shared Modifiers
-Some modifiers can be meaningfully shared among multiple PIDPlus controllers, because they have no implicit/internal state. A good example is `I_Windup` which simply performs a (stateless) calculation on the integration value it is supplied via a notification event.
-
-Some modifiers have state but still can be meaningfully shared; a good example is the PIDHistory modifier. If a single PIDHistory is attached to multiple PIDPlus control objects, the history will contain an interwoven list of events (each which will have the .pid attribute to disambiguate which controller it came from).
-
-Some modifiers cannot be meaningfully shared because they have controller-specific internal state. The SetpointRamp modifier is a good example of this. Such modifiers should generally be coded to raise an exception if sharing is attempted. The `PH_attached` notification can be used for this; here is a trivial example that is a no-op but does not allow itself to be attached more than once:
-
-    class AttachToJustOne(PIDModifier):
-        def PH_attached(self, event):
-            try:
-                if self.__attached_to != event.pid:
-                    raise TypeError("multiple attachment attempted")
-            except AttributeError:
-                self.__attached_to = event.pid
 
