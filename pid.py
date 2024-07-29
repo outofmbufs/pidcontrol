@@ -874,6 +874,7 @@ class SetpointRamp(PIDModifier):
             raise ValueError(f"threshold (={threshold}) must not be negative")
 
         super().__init__(*args, **kwargs)
+        self.pid = None            # won't know this until PH_attached
         self._hiddenramp = hiddenramp
         self._ramptime = secs
         self._threshold = threshold
@@ -911,9 +912,16 @@ class SetpointRamp(PIDModifier):
             # This arbitrarily defines the semantic of a mid-ramp secs change
             # to mean: continue whatever ramping remains, with that remaining
             # ramp spread out over the new secs
+
             self._start_sp = self._ramped()   # i.e., ramp starts HERE ...
 
             # but if it's been set to zero, just go there RIGHT NOW
+            # NOTE: being able to set secs to zero midramp requires knowing
+            #       the .pid here (to... set the setpoint). Obviously, there
+            #       is no "event" to get the pid out of here, so that's why
+            #       PH_attached records self.pid (and, in sympathy, why all
+            #       other places the pid is needed it comes from self.pid
+            #       even when it is available more naturally as event.pid)
             if v == 0:
                 self._set_real_setpoint(self._target_sp)
 
@@ -923,7 +931,7 @@ class SetpointRamp(PIDModifier):
     # then it happens immediately (no ramping).
     def PH_initial_conditions(self, event):
         # If the setpoint is unchanged (carried forward) it is None...
-        sp = event.pid.setpoint if event.setpoint is None else event.setpoint
+        sp = self.pid.setpoint if event.setpoint is None else event.setpoint
         self._noramp(setpoint=sp)
 
     def PH_setpoint_change(self, event):
@@ -934,7 +942,7 @@ class SetpointRamp(PIDModifier):
             return
 
         # if the change is within threshold, set immediate, cancel ramping
-        if abs(event.sp_set - event.pid.setpoint) < self._threshold:
+        if abs(event.sp_set - self.pid.setpoint) < self._threshold:
             self._noramp(setpoint=event.sp_set)
             return
 
@@ -951,9 +959,8 @@ class SetpointRamp(PIDModifier):
     def _set_real_setpoint(self, v):
         """Set the real setpoint in the underlying pid, bypasing ramping."""
 
-        # This ends up being called from __init__ before being attached.
-        # So have to check for no .pid yet
-        if not hasattr(self, 'pid'):
+        # There are several ways can end up here before attachment, so ...
+        if self.pid is None:
             return
 
         # if the ramp is being hidden, then regardless of what the rest of
@@ -985,7 +992,7 @@ class SetpointRamp(PIDModifier):
         # the other way (countdown slightly larger than correct) then this
         # tick gets the setpoint to 99.x% of the final value and there will
         # be one extra tick for the rest. No one cares; this is good enough.
-        if self._countdown <= event.pid.dt:
+        if self._countdown <= self.pid.dt:
             # last tick; slam to _target_sp in case of any floating fuzz.
             self._set_real_setpoint(self._target_sp)
             self._countdown = 0
@@ -994,14 +1001,14 @@ class SetpointRamp(PIDModifier):
             # potentially also be the "one extra" tick mentioned above
             # in which case pcttime will be very very close to 1.00 and
             # the next tick after this will trigger the above branch
-            self._countdown -= event.pid.dt
+            self._countdown -= self.pid.dt
             self._set_real_setpoint(self._ramped())
 
             # when the ramping setpoint is being hidden, this needs to
             # supply an alternate 'e' making use of the ramping setpoint
             # rather than the public .setpoint
             if self._hiddenramp:
-                event.e = self._ramped() - event.pid.pv
+                event.e = self._ramped() - self.pid.pv
 
     def __repr__(self):
         s = f"{self.__class__.__name__}({self._ramptime}"
