@@ -278,7 +278,7 @@ class PIDPlus(PID):
             s = s[:-1]
             if s[-1] != '(':
                 s += ', '
-            premod = "modifiers="
+            premod = "modifiers=("
             for m in self.modifiers:
                 s += f"{premod}{m}"
                 premod = ", "
