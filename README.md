@@ -247,6 +247,12 @@ It is possible, but likely a bad idea, to keep infinite history via None:
 
 in which case the .history sequence will grow without bound.
 
+By default, `PIDHistory` just records the event notifications, but it can optionally include all of the `pid` object state in those records as well. To enable this use `detail=True`:
+
+    m = PIDHistory(100, detail=True)
+
+will keep 100 entries, and each entry will have an extra attribute, `pidinfo`, which will contain a dictionary copy of `vars(pid)`.
+
 A `PIDHistory` also counts event occurrences, by handlername(). The counts are in the `.eventcounts` attribute:
 
     m = PIDHistory()
@@ -316,6 +322,23 @@ Note that the order of the modifiers in that list is significant: they will be a
     p = PIDPlus(Kp=foo, Ki=bar, Kd=baz, modifiers=[h1, ramp, windup, h2])
 
 In this example, h1.history would have the records from BEFORE the ramp and windup handlers ran; h2.history would have the records from AFTER. Instantiating a PIDPlus with multiple objects of other modifiers (e.g., two SetpointRamp modifiers) is not generally useful (and the exact behavior may be implementation-dependent).
+
+It also, of course, possible to encapsulate all of this into a PIDPlus subclass. For example:
+
+    class RampWindupHistory(PIDPlus):
+        def __init__(self, *args, ramptime=1.5, windup=4.2, **kwargs):
+            # Make the modifiers easily available as attributes
+            self.ramp = SetpointRamp(ramptime)
+            self.windup = I_Windup(windup)
+            self.h = PIDHistory()
+
+            mods = (self.ramp, self.windup, self.h)
+            super().__init__(*args, modifiers=mods, **kwargs)
+
+which simplifies usage (with the default parameters) to:
+
+    p = RampWindupHistory()
+
 
 ## General Performance Notes
 A `PIDPlus` can be used with no modifiers:
@@ -465,10 +488,8 @@ Each event object and its semantics are described below.
 
 Generated **_DURING_** PIDPlus.__init__ for each modifier attached to that PIDPlus.
 
-HANDLER SIGNATURE: `PH_attached(self, event)`
-
 READ-ONLY ATTRIBUTES:
-- `pid` -- the PIDPlus object. CAUTION: NOT FULLY INITAILIZED AT THIS POINT.
+- `pid` -- the PIDPlus object. CAUTION: NOT FULLY INITIALIZED AT THIS POINT.
 
 This notification happens before the PIDPlus object is fully set up; handlers should not attempt to look into the `event.pid` object. They can, of course, look **at** `event.pid` itself which is the reason for this notification.
 
@@ -500,8 +521,6 @@ this will produce the same result as the explicit `PH_attached` handler shown ab
 
 Generated when the `initial_conditions` method is invoked on a PIDPlus object.
 
-HANDLER SIGNATURE: `PH_initial_conditions(self, event)`
-
 READ-ONLY ATTRIBUTES:
 - `pid` -- the PIDPlus object
 - `setpoint` -- the `setpoint` argument specified in the corresponding `initial_conditions()` method invocation. NOTE: Can be None (meaning: no setpoint change).
@@ -511,15 +530,13 @@ As noted above, this event is generated **after** the initial_conditions method 
 
 ### PIDHookSetpointChange: (handler method: PH_setpoint_change)
 
-Generated when the setpoint attribute is set on a PIDPlus object. PIDModifier method name: `PH_setpoint_change` .
+Generated when the setpoint attribute is set on a PIDPlus object. a
 
 NOTE: This event is NOT generated if the setpoint change happens as part of an initial_conditions() call.
 
 This event is generated BEFORE any modifications in the underlying PIDPlus object occur. This gives the handler the opportunity to affect the setpoint change as described with the attributes below.
 
 There is one read/write attribute and the rest are read-only.
-
-HANDLER SIGNATURE: `PH_setpoint_change(self, event)`
 
 READ-WRITE ATTRIBUTES:
 - `sp_now` -- If the handler sets this attribute to something other than None (its default), then this value is used to set the setpoint. 
@@ -605,8 +622,6 @@ The `e` term can not be modified here as it has already been used by this point.
 
 ### PIDHookCalculateU (handler name: PH_calculate_u)
 The last of the three events during `.pid()` calculation. At this stage a candidate `u` value has been computed from the p/i/d terms. Only the `u` value can be overridden at this stage; the remaining attributes are read-only.
-
-HANDLER SIGNATURE: `PH_calculate_u(self, event)`
 
 READ-WRITE ATTRIBUTES:
 - `u` -- the candidate control value to ultimately return. Will NEVER be None.
