@@ -495,7 +495,8 @@ this will print
     PIDHookSetpointChange(sp_now=None, sp_prev=0, sp_set=7, xyz=bozo)
 
 **Suggestion for learning/debugging**
-An easy way to get a better feel for what the event stream does is to use the `EventPrint` modifier and just interactively try some examples. Here is a sample ession:
+
+An easy way to get a better feel for what the event stream does is to use the `EventPrint` modifier and just interactively try some examples. Here is a sample session:
 
     Python 3.12.3 (v3.12.3:f6650f9ad7, Apr  9 2024, 08:18:47
     Type "help", "copyright", "credits" or "license" for more information.
