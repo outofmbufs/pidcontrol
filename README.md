@@ -127,6 +127,20 @@ As a convenience, if there is only one modifier it can be supplied by itself ins
 
 The specific PIDModifier class names and __init__ signatures are:
 
+### EventPrint
+
+This is a trivially-simply modifier that will print out events as they occur. It can be very helpful in debugging and also for learning about how the event system works when writing a custom PIDModifier.
+
+Example:
+
+    from pid import PIDPlus, EventPrint
+    z = PIDPlus(modifiers=EventPrint())
+
+will immediately print:
+
+    PIDHookAttached()
+    PIDHookInitialConditions(setpoint=0, pv=0)
+
 ### SetpointRamp
 
 Example usage - to cause all modifications of z.setpoint to be ramped in over a period of 1.5 seconds:
@@ -479,6 +493,32 @@ As an example of setting attributes for logging purposes:
 this will print
 
     PIDHookSetpointChange(sp_now=None, sp_prev=0, sp_set=7, xyz=bozo)
+
+**Suggestion for learning/debugging**
+An easy way to get a better feel for what the event stream does is to use the `EventPrint` modifier and just interactively try some examples. Here is a sample ession:
+
+    Python 3.12.3 (v3.12.3:f6650f9ad7, Apr  9 2024, 08:18:47
+    Type "help", "copyright", "credits" or "license" for more information.
+
+    >>> from pid import PIDPlus, EventPrint
+    >>> z = PIDPlus(Kp=2, Ki=0.1, Kd=0.5, modifiers=EventPrint())
+    PIDHookAttached()
+    PIDHookInitialConditions(setpoint=0, pv=0)
+
+    >>> z.initial_conditions(setpoint=5, pv=2)
+    PIDHookInitialConditions(setpoint=5, pv=2)
+
+    >>> cv = z.pid(2, dt=1)
+    PIDHookBaseTerms(e=None, p=None, i=None, d=None, u=None)
+    PIDHookModifyTerms(e=3, p=3, i=3, d=0.0, u=None)
+    PIDHookCalculateU(e=3, p=3, i=3, d=0.0, u=6.3)
+
+    >>> cv
+    6.3
+
+    >>>
+
+See also PIDHistory which stores events for later analysis, rather than printing them.
 
 **Details of each PIDHookEvent subclass and handlers**
 
