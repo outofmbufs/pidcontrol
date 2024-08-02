@@ -828,17 +828,14 @@ class I_SetpointReset(PIDModifier):
         """
         super().__init__(*args, **kwargs)
         self.integration_pause = secs
-        self._initialize_state()
+        self.pause_remaining = 0
 
     def PH_initial_conditions(self, event):
-        self._initialize_state()
-
-    def _initialize_state(self):
         self.pause_remaining = 0
-        self._trigger = False
 
     def PH_setpoint_change(self, event):
-        self._trigger = True
+        event.pid.integration = 0
+        self.pause_remaining = self.integration_pause
 
     def PH_base_terms(self, event):
         # When triggered (by a setpoint change):
@@ -847,13 +844,6 @@ class I_SetpointReset(PIDModifier):
         #   - integration is paused while the controller settles into the
         #     new regime. This is a variation on "windup protection"
         #     which has a similar goal.
-
-        if self._trigger:
-            event.pid.integration = 0
-            self.pause_remaining = self.integration_pause
-            self._trigger = False
-            event.i = 0
-
         if self.pause_remaining > 0:
             # max() for good housekeeping re: floating fuzz; force neg to 0
             self.pause_remaining = max(0, self.pause_remaining - event.pid.dt)
@@ -1254,6 +1244,30 @@ if __name__ == "__main__":
             self.assertEqual(p.pid(pv1, dt=1), u1)
             self.assertEqual(p.pid(pv2, dt=1), u2)
             self.assertEqual(p.pid(pv3, dt=1), u3)
+
+        # Test I_SetpointReset
+        def test_i_reset1(self):
+            # changing the setpoint should reset integration and
+            # stop accumulation of integration for N seconds
+            setpoint = 0.5
+            for secs in (0, 5):
+                z = PIDPlus(Ki=1, modifiers=I_SetpointReset(secs))
+                z.initial_conditions(pv=0, setpoint=setpoint)
+                # two pids should accumulate two setpoint's error
+                # and the initial_conditions should not have triggered reset
+                u1 = z.pid(0, dt=1)
+                self.assertEqual(u1, setpoint)
+                u2 = z.pid(0, dt=1)
+                self.assertEqual(u2, u1 + setpoint)
+                # but now changing the setpoint should cause a reset
+                z.setpoint = 2*setpoint
+                self.assertEqual(z.integration, 0)
+                for tick in range(secs):
+                    with self.subTest(tick=tick, secs=secs):
+                        self.assertEqual(z.pid(0, dt=1), 0)
+
+                # and this last one should be > 0 as now past the secs
+                self.assertTrue(z.pid(0, dt=1) > 0)
 
         def test_setpointramp_trivia(self):
             # a few very directed simple tests at some prior bugs
