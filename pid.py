@@ -969,10 +969,8 @@ class SetpointRamp(PIDModifier):
         self._countdown = self._ramptime
         clampf = min if self._start_sp < self._target_sp else max
         self._clamper = lambda x: clampf(x, self._target_sp)
-        if self._hiddenramp:
-            event.sp_now = self._target_sp    # change it immediately
-        else:
-            event.sp_now = self._ramped()     # or .. make it ramp
+        if not self._hiddenramp:
+            event.sp_now = self._ramped()     # make it ramp
 
     def _set_real_setpoint(self, v):
         """Set the real setpoint in the underlying pid, bypasing ramping."""
@@ -981,12 +979,11 @@ class SetpointRamp(PIDModifier):
         if self.pid is None:
             return
 
-        # if the ramp is being hidden, then regardless of what the rest of
-        # the SetpointRamp code wanted to set the .setpoint to, set it
-        # to the target (!) ... see PH_base_terms for the reason this
-        # still ends up providing ramping even while hiding it from .setpoint
+        # if the ramp is being hidden there's nothing to do here; allowing
+        # _set_real_setpoint() to be called anyway simplifies the rest of
+        # code from having to test _hiddenramp
         if self._hiddenramp:
-            v = self._target_sp
+            return
 
         # This try/finally block is necessary because there could be OTHER
         # modifiers with PH_setpoint_change handlers, so anything in terms
@@ -1020,13 +1017,15 @@ class SetpointRamp(PIDModifier):
             # in which case pcttime will be very very close to 1.00 and
             # the next tick after this will trigger the above branch
             self._countdown -= self.pid.dt
-            self._set_real_setpoint(self._ramped())
 
             # when the ramping setpoint is being hidden, this needs to
             # supply an alternate 'e' making use of the ramping setpoint
             # rather than the public .setpoint
             if self._hiddenramp:
                 event.e = self._ramped() - self.pid.pv
+            else:
+                # otherwise: here is where the ramping becomes effective
+                self._set_real_setpoint(self._ramped())
 
     def __repr__(self):
         s = f"{self.__class__.__name__}({self._ramptime}"
@@ -1268,86 +1267,103 @@ if __name__ == "__main__":
         def test_setpointramp_trivia(self):
             # a few very directed simple tests at some prior bugs
 
-            p = PIDPlus(modifiers=SetpointRamp(1))
+            for hidden in (False, True):
+                p = PIDPlus(modifiers=SetpointRamp(1, hiddenramp=hidden))
 
-            initial_setpoint = p.setpoint    # this will be zero
+                initial_setpoint = p.setpoint    # this will be zero
 
-            p.setpoint = 10
-            # it should read back as zero because the ramp should be
-            # set up but no ramping has happened yet.
-            self.assertEqual(p.setpoint, initial_setpoint)
+                p.setpoint = 10
+                if hidden:
+                    # it should always just show as the target
+                    expecting = 10
+                else:
+                    # it should read back as zero because the ramp should be
+                    # set up but no ramping has happened yet.
+                    expecting = 0
+            self.assertEqual(p.setpoint, expecting)
 
         def test_spramp1(self):
             ramptime = 17       # just to be ornery with division/fuzz
             setpoint = 5
             dt = 0.100
 
-            p = PIDPlus(Kp=1, modifiers=SetpointRamp(ramptime))
-            p.initial_conditions(pv=0, setpoint=setpoint)
+            for hidden in (False, True):
+                r = SetpointRamp(ramptime, hiddenramp=hidden)
+                p = PIDPlus(Kp=1, modifiers=r)
+                p.initial_conditions(pv=0, setpoint=setpoint)
 
-            # verify that initial_conditions didn't cause ramping
-            for pv, u in ((1, setpoint-1),
-                          (1, setpoint-1),
-                          (2, setpoint-2),
-                          (0, setpoint),
-                          (setpoint, 0)):
-                with self.subTest(pv=pv, u=u):
-                    self.assertEqual(p.pid(pv, dt=dt), u)
+                # verify that initial_conditions didn't cause ramping
+                for pv, u in ((1, setpoint-1),
+                              (1, setpoint-1),
+                              (2, setpoint-2),
+                              (0, setpoint),
+                              (setpoint, 0)):
+                    with self.subTest(pv=pv, u=u):
+                        self.assertEqual(p.pid(pv, dt=dt), u)
 
-            # now verify that it ramps ... go up to 2*setpoint
-            p.setpoint = 2 * setpoint
+                # now verify that it ramps ... go up to 2*setpoint
+                p.setpoint = 2 * setpoint
 
-            ramped = setpoint
-            for i in range(int((ramptime / dt) + 0.5)):
-                with self.subTest(i=i):
-                    u = p.pid(0, dt=dt)
-                    ramped += (setpoint / ramptime) * dt
-                    self.assertTrue(math.isclose(u, ramped))
+                ramped = setpoint
+                for i in range(int((ramptime / dt) + 0.5)):
+                    with self.subTest(i=i):
+                        u = p.pid(0, dt=dt)
+                        ramped += (setpoint / ramptime) * dt
+                        self.assertTrue(math.isclose(u, ramped))
 
-            # at this point the setpoint is not usually exact because
-            # of floating point fuzz. But if so, one more iteration should
-            # peg it to the _target_sp and be exact. Check that.
-            u = p.pid(0, dt=dt)
-            self.assertEqual(p.setpoint, setpoint * 2)
+                # at this point the setpoint is not usually exact because
+                # of floating point fuzz. But if so, one more iteration should
+                # peg it to the _target_sp and be exact. Check that.
+                u = p.pid(0, dt=dt)
+                self.assertEqual(p.setpoint, setpoint * 2)
 
         def test_spramp2(self):
             # test that fussing with the secs parameter midramp works
-            ramper = SetpointRamp(4)
-            p = PIDPlus(Kp=1, modifiers=ramper)
-            p.initial_conditions(pv=0, setpoint=0)
-            p.setpoint = 100
 
-            # in two 1-second intervals it should get halfway there
-            p.pid(0, dt=1)
-            p.pid(0, dt=1)
-            self.assertTrue(math.isclose(p.setpoint, 50))
+            for hidden in (False, True):
+                ramper = SetpointRamp(4, hiddenramp=hidden)
+                p = PIDPlus(Kp=1, modifiers=ramper)
+                p.initial_conditions(pv=0, setpoint=0)
+                p.setpoint = 100
 
-            # now if change secs to 5, should go by 10 more each time...
-            ramper.secs = 5
-            for i in range(5):
+                # in two 1-second intervals it should get halfway there
                 p.pid(0, dt=1)
-                expected = 50 + ((i + 1) * 10)
-                with self.subTest(sp=p.setpoint, i=i):
-                    self.assertTrue(math.isclose(p.setpoint, expected))
+                u = p.pid(0, dt=1)
+                self.assertTrue(math.isclose(u, 50))
+                if not hidden:
+                    self.assertTrue(math.isclose(p.setpoint, 50))
+
+                # now if change secs to 5, should go by 10 more each time...
+                ramper.secs = 5
+                for i in range(5):
+                    u = p.pid(0, dt=1)
+                    expected = 50 + ((i + 1) * 10)
+                    with self.subTest(sp=p.setpoint, u=u, i=i, hdn=hidden):
+                        if not hidden:
+                            self.assertTrue(math.isclose(p.setpoint, expected))
+                        self.assertTrue(math.isclose(u, expected))
 
         def test_spramp3(self):
             # test that fussing with the secs parameter midramp works
             # but in this case testing "aborting the ramp" by setting secs=0
-            ramper = SetpointRamp(4)
-            p = PIDPlus(Kp=1, modifiers=ramper)
-            p.initial_conditions(pv=0, setpoint=0)
-            p.setpoint = 100
+            for hidden in (False, True):
+                ramper = SetpointRamp(4, hiddenramp=hidden)
+                p = PIDPlus(Kp=1, modifiers=ramper)
+                p.initial_conditions(pv=0, setpoint=0)
+                p.setpoint = 100
 
-            # in two 1-second intervals it should get halfway there
-            p.pid(0, dt=1)
-            p.pid(0, dt=1)
-            self.assertTrue(math.isclose(p.setpoint, 50))
+                # in two 1-second intervals it should get halfway there
+                p.pid(0, dt=1)
+                u = p.pid(0, dt=1)
+                if not hidden:
+                    self.assertTrue(math.isclose(p.setpoint, 50))
+                self.assertTrue(math.isclose(u, 50))
 
-            # now if change secs to 0, should ramp immediately to target
-            ramper.secs = 0
-            p.pid(0, dt=1)
-            with self.subTest(sp=p.setpoint):
-                self.assertTrue(math.isclose(p.setpoint, 100))
+                # now if change secs to 0, should ramp immediately to target
+                ramper.secs = 0
+                u = p.pid(0, dt=1)
+                with self.subTest(sp=p.setpoint, hidden=hidden):
+                    self.assertTrue(math.isclose(u, 100))
 
         def test_sprampmonogamous(self):
             ramper = SetpointRamp(17)
@@ -1362,31 +1378,35 @@ if __name__ == "__main__":
             ramptime = 5
             dt = 1
 
-            for smallchange in (-threshold / 2,
-                                threshold / 2,
-                                # these values really just test the test
-                                -threshold / 123456,
-                                threshold / 123456):
-                with self.subTest(smallchange=smallchange):
-                    r = SetpointRamp(ramptime, threshold=threshold)
-                    z = PIDPlus(Kp=1, modifiers=r)
-                    z.setpoint = setpoint
-                    cv = z.pid(0, dt=dt)
-                    ramped = (dt / ramptime) * setpoint
-                    self.assertTrue(math.isclose(cv, ramped))
-                    # because Kp was 1 these should be equal
-                    self.assertEqual(z.setpoint, cv)
+            for hidden in (False, True):
+                for smallchange in (-threshold / 2,
+                                    threshold / 2,
+                                    # these values really just test the test
+                                    -threshold / 123456,
+                                    threshold / 123456):
+                    with self.subTest(smallchange=smallchange, hdn=hidden):
+                        r = SetpointRamp(ramptime,
+                                         threshold=threshold,
+                                         hiddenramp=hidden)
+                        z = PIDPlus(Kp=1, modifiers=r)
+                        z.setpoint = setpoint
+                        u = z.pid(0, dt=dt)
+                        ramped = (dt / ramptime) * setpoint
+                        self.assertTrue(math.isclose(u, ramped))
+                        if not hidden:
+                            # because Kp was 1 these should be equal
+                            self.assertEqual(z.setpoint, u)
 
-                    # now make a 'smallchange' which should also have
-                    # the side-effect of cancelling the in-progress ramp
-                    newsetpoint = z.setpoint + smallchange
-                    z.setpoint = newsetpoint
-                    cv = z.pid(0, dt=dt)
-                    self.assertEqual(cv, newsetpoint)
-                    self.assertEqual(z.setpoint, newsetpoint)
+                        # now make a 'smallchange' which should also have
+                        # the side-effect of cancelling the in-progress ramp
+                        newsetpoint = z.setpoint + smallchange
+                        z.setpoint = newsetpoint
+                        u = z.pid(0, dt=dt)
+                        self.assertEqual(u, newsetpoint)
+                        self.assertEqual(z.setpoint, newsetpoint)
 
-                    # and the next z.pid call shouldn't be ramping anything
-                    self.assertEqual(z.pid(0, dt=dt), cv)
+                        # and the next z.pid call shouldn't be ramping anything
+                        self.assertEqual(z.pid(0, dt=dt), u)
 
         def test_initial_conditions(self):
             h = PIDHistory()
