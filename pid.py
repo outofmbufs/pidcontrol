@@ -892,7 +892,7 @@ class SetpointRamp(PIDModifier):
             raise ValueError(f"threshold (={threshold}) must not be negative")
 
         super().__init__(*args, **kwargs)
-        self.pid = None            # won't know this until PH_attached
+        self.pid = None            # won't know pid until PH_attached
         self._hiddenramp = hiddenramp
         self._ramptime = secs
         self._threshold = threshold
@@ -900,19 +900,15 @@ class SetpointRamp(PIDModifier):
 
     def _noramp(self, /, *, setpoint):
         """Returns state to 'no ramp in progress'."""
-        self._start_sp = setpoint            # starting setpoint
         self._target_sp = setpoint           # ending setpoint
-        self._set_real_setpoint(setpoint)    # observed setpoint
         self._countdown = 0                  # time remaining in ramp
+        self._set_real_setpoint(setpoint)    # observed setpoint
 
     def _ramped(self):
         """Return the current (ramped) setpoint based on _countdown"""
-        if self._countdown == 0:
-            return self._target_sp
-        else:
-            pcttime = (self._ramptime - self._countdown) / self._ramptime
-            totaldelta = (self._target_sp - self._start_sp)
-            return self._clamper(self._start_sp + (totaldelta * pcttime))
+        pcttime = (self._ramptime - self._countdown) / self._ramptime
+        totaldelta = (self._target_sp - self._start_sp)
+        return self._clamper(self._start_sp + (totaldelta * pcttime))
 
     # property because if it changes the ramping may have to be adjusted
     @property
@@ -921,12 +917,7 @@ class SetpointRamp(PIDModifier):
 
     @secs.setter
     def secs(self, v):
-        try:
-            midramp = self._ramped() != self._target_sp
-        except AttributeError:         # not attached yet
-            midramp = False
-
-        if midramp:
+        if self._countdown > 0:     # i.e., mid-ramp
             # This arbitrarily defines the semantic of a mid-ramp secs change
             # to mean: continue whatever ramping remains, with that remaining
             # ramp spread out over the new secs
