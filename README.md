@@ -129,7 +129,7 @@ The specific PIDModifier class names and __init__ signatures are:
 
 ### EventPrint
 
-This is a trivially-simply modifier that will print out events as they occur. It can be very helpful in debugging and also for learning about how the event system works when writing a custom PIDModifier.
+This is a trivially-simple modifier that will print out events as they occur. It can be helpful in debugging and also for learning about how the event system works when writing a custom PIDModifier.
 
 Example:
 
@@ -277,7 +277,7 @@ will print:
 
     Counter({'PH_attached': 1, 'PH_initial_conditions': 1})
 
-showing the count of events (1 `PH_attached` and 1 `PH_initial_conditions`) that occur simply from creating the PIDPlus object. Note that these counts are for events _generated_ regardless of whether any modifier had a handler for them.
+showing the count of events (1 `PH_attached` and 1 `PH_initial_conditions`) that occur when creating the PIDPlus object. Note that these counts are for events _generated_ regardless of whether any modifier had a handler for them.
 
 
 ### Bang Bang
