@@ -7,7 +7,7 @@ See [Wikipedia PID](https://en.wikipedia.org/wiki/Proportional%E2%80%93integral%
 To create a simple P/I/D (proportional/integral/derivative) controller:
 
     from pid import PID
-    p = PID(Kp=foo, Ki=bar, Kd=baz)
+    z = PID(Kp=foo, Ki=bar, Kd=baz)
 
 where foo/bar/baz (Kp=/Ki=/Kd=) are the gain constants for the respective control calculations.
 
@@ -333,7 +333,7 @@ Note that the order of the modifiers in that list is significant: they will be a
     h1 = PIDHistory(1000)         # keep 1000 history records
     h2 = PIDHistory(1000)         # also keep 1000 history records
     
-    p = PIDPlus(Kp=foo, Ki=bar, Kd=baz, modifiers=[h1, ramp, windup, h2])
+    z = PIDPlus(Kp=foo, Ki=bar, Kd=baz, modifiers=[h1, ramp, windup, h2])
 
 In this example, h1.history would have the records from BEFORE the ramp and windup handlers ran; h2.history would have the records from AFTER. Instantiating a PIDPlus with multiple objects of other modifiers (e.g., two SetpointRamp modifiers) is not generally useful (and the exact behavior may be implementation-dependent).
 
@@ -351,13 +351,13 @@ It also, of course, possible to encapsulate all of this into a PIDPlus subclass.
 
 which simplifies usage (with the default parameters) to:
 
-    p = RampWindupHistory()
+    z = RampWindupHistory()
 
 
 ## General Performance Notes
 A `PIDPlus` can be used with no modifiers:
 
-    p = PIDPlus(Kp=foo, Ki=bar, Kd=baz)
+    z = PIDPlus(Kp=foo, Ki=bar, Kd=baz)
 
 This is fine but runs slower than the equivalent `PID` would. To compare performance of `PID` vs a no-modifier `PIDPlus`, the following tests were run:
 
