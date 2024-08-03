@@ -107,11 +107,11 @@ if __name__ == "__main__":
         args = processargs()
 
         f = FanSlider(Smax=args.fanthrust)
-        try:
-            z = make_pid_control(args)
-        except ValueError:
+        if all(x is None
+               for x in (args.Kp, args.Ki, args.Kd, args.Ti, args.Td)):
             print("Try --Kp=70 --Ti=1.25 --Td=0.5 -n=500")
             return
+        z = make_pid_control(args)
         z.setpoint = args.setpoint
         runsim(z, f, args.n, args.interval)
 
