@@ -236,7 +236,7 @@ class PIDPlus(PID):
         # FIRST PIDHookEvent: BaseTerms
         # Run all the BaseTerms events which may (or may not) establish
         # some of the process control values (e/p/i/d/u).
-        cx = PIDHookBaseTerms(pid=self).notify(self.modifiers)
+        cx = PIDHookBaseTerms(pid=self, dt=self.dt).notify(self.modifiers)
 
         # Anything not supplied by a BaseTerms modifier is calculated
         # the standard way here:
@@ -618,15 +618,15 @@ class _PIDHook_Calc(_PIDHookEvent):
 
 
 class PIDHookBaseTerms(_PIDHook_Calc):
-    READONLY = None
+    READONLY = {'dt'}
 
 
 class PIDHookModifyTerms(_PIDHook_Calc):
-    READONLY = {'e'}
+    READONLY = {'e', 'dt'}
 
 
 class PIDHookCalculateU(_PIDHook_Calc):
-    READONLY = {'e', 'p', 'i', 'd'}
+    READONLY = {'e', 'p', 'i', 'd', 'dt'}
 
 
 # Any PIDModifier that wants to stop hook processing raises this:
@@ -777,25 +777,20 @@ class I_Windup(PIDModifier):
         OPTIONALLY: if w is a tuple then the integration value will be
                     held to [a, b] range where:
                        a, b = sorted(w)
-        Instead of specifying a tuple for w, it is also allowed for
-        there to be exactly two non-keyword arguments, both numeric.
-        They will be taken as a "w tuple" and treated accordingly.
         """
 
-        # see if the two-arg numeric form
-        if len(args) == 1:
-            try:
-                # this is testing if args[0] is number-ish
-                numeric = args[0] < 0 or args[0] >= 0
-            except (TypeError, ValueError):
-                numeric = False
-            if numeric:
-                w = (w, args[0])
-                args = []
+        # see if w is a tuple (of length 2)
         try:
             a, b = sorted(w)
         except TypeError:
             a, b = -abs(w), abs(w)    # prevent negative shenanigans
+
+        # make sure a and b are both numeric
+        try:
+            foo = a + 1
+            bar = b + 2
+        except TypeError:
+            raise ValueError(f"invalid limit values: {w}") from None
 
         super().__init__(*args, **kwargs)
         self.w0 = a
@@ -812,6 +807,69 @@ class I_Windup(PIDModifier):
         else:
             s += f"({self.w0}, {self.w1})"
         return s + ")"
+
+
+# This modifier allows freezing the integration term for a period of time
+# based on external logic. As described, for example, in the wikipedia PID
+# article section on algorithm modifications:
+#
+#     For example, a PID loop is used to control the temperature of an
+#     electric resistance furnace where the system has stabilized. Now when
+#     the door is opened and something cold is put into the furnace the
+#     temperature drops below the setpoint. The integral function of the
+#     controller tends to compensate for error by introducing another error
+#     in the positive direction. This overshoot can be avoided by freezing
+#     of the integral function after the opening of the door for the time
+#     the control loop typically needs to reheat the furnace.
+#
+# See methods freeze() and unfreeze()
+#
+class I_Freeze(PIDModifier):
+    """Adds freeze/unfreeze capability to integration term"""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.unfreeze()
+
+    # This is a stateful modifier and cannot be shared among PIDs
+    PH_attached = PIDModifier.attached_once_check
+
+    # The state method returns True if integration is frozen, False if not,
+    # and is responsible for advancing any internal timers or other internal
+    # freeze duration state as appropriate given the (PHBaseTerms) event.
+    #
+    # In this default version, state() implements the timed duration and also
+    # of course responds to freeze/unfreeze requests.
+    #
+    # Subclasses can override this to implement more-elaborate rules for
+    # when the integration should be frozen/unfrozen.
+    def state(self, event):
+        if self._duration == 0:
+            return False
+        elif self._duration is None:
+            return self.frozen
+        else:
+            self._duration = max(0, self._duration - event.dt)
+            self.frozen = self._duration > 0
+            return True
+
+    def freeze(self, /, *, duration=None):
+        """Freeze the current integration term.
+
+        By default freezes it until unfreeze() invoked.
+        If given a duration, freezes it only for that long (in seconds).
+        """
+        self.frozen = True
+        self._duration = duration
+
+    def unfreeze(self):
+        """Unfreeze integration; resume it at pre-freeze value."""
+        self.frozen = False
+        self._duration = 0
+
+    def PH_base_terms(self, event):
+        if self.state(event):
+            event.i = event.pid.integration
 
 
 class I_SetpointReset(PIDModifier):
@@ -846,7 +904,7 @@ class I_SetpointReset(PIDModifier):
         #     which has a similar goal.
         if self.pause_remaining > 0:
             # max() for good housekeeping re: floating fuzz; force neg to 0
-            self.pause_remaining = max(0, self.pause_remaining - event.pid.dt)
+            self.pause_remaining = max(0, self.pause_remaining - event.dt)
 
             # Supplying .i here supplants _integral() (i.e., prevents it
             # from being invoked in _calculate). Therefore, this also
@@ -988,7 +1046,7 @@ class SetpointRamp(PIDModifier):
         # the other way (countdown slightly larger than correct) then this
         # tick gets the setpoint to 99.x% of the final value and there will
         # be one extra tick for the rest. No one cares; this is good enough.
-        if self._countdown <= self.pid.dt:
+        if self._countdown <= event.dt:
             # last tick; slam to _target_sp in case of any floating fuzz.
             self._set_real_setpoint(self._target_sp)
             self._countdown = 0
@@ -997,7 +1055,7 @@ class SetpointRamp(PIDModifier):
             # potentially also be the "one extra" tick mentioned above
             # in which case pcttime will be very very close to 1.00 and
             # the next tick after this will trigger the above branch
-            self._countdown -= self.pid.dt
+            self._countdown -= event.dt
 
             # when the ramping setpoint is being hidden, this needs to
             # supply an alternate 'e' making use of the ramping setpoint
@@ -1110,7 +1168,7 @@ class D_DeltaE(PIDModifier):
         if self.previous_e is None:     # special case for very first call
             event.d = 0
         elif self.kickticks == 0:
-            event.d = (event.e - self.previous_e) / event.pid.dt
+            event.d = (event.e - self.previous_e) / event.dt
         else:
             self.kickticks -= 1
             event.d = self.previous_d
@@ -1244,6 +1302,69 @@ if __name__ == "__main__":
             self.assertEqual(p.pid(pv1, dt=1), u1)
             self.assertEqual(p.pid(pv2, dt=1), u2)
             self.assertEqual(p.pid(pv3, dt=1), u3)
+
+        # I_Freeze tests
+        def test_i_freeze_basic(self):
+            frz = I_Freeze()
+            z = PIDPlus(Ki=1, modifiers=frz)
+            setpoint = 5
+            setpoint_divisor = 100
+            dt = setpoint / setpoint_divisor
+            pv = 0
+            z.initial_conditions(pv=pv, setpoint=setpoint)
+
+            # test this range, with an interruption in the middle for freeze
+            n = 2 * setpoint_divisor
+            freeze_at = n // 2
+
+            for i in range(n):
+                u = z.pid(pv, dt=dt)
+                self.assertTrue(
+                    math.isclose(u, (setpoint - pv) * dt * (i + 1)))
+
+                if i == freeze_at:
+                    # freeze it and do a while bunch of intervals
+                    frz.freeze()
+                    for _ in range(100):
+                        self.assertTrue(math.isclose(u, z.pid(pv, dt=dt)))
+
+                    # unfreeze it and see if it resumes correctly
+                    frz.unfreeze()
+
+        def test_i_freeze_secs(self):
+            # similar to basic test but only freeze for a period of time
+            frz = I_Freeze()
+            z = PIDPlus(Ki=1, modifiers=frz)
+            setpoint = 5
+            setpoint_divisor = 100
+            dt = setpoint / setpoint_divisor
+            pv = 0
+            z.initial_conditions(pv=pv, setpoint=setpoint)
+
+            # test this range, with an interruption in the middle for freeze
+            n = 2 * setpoint_divisor
+            freeze_at = n // 2
+
+            # need to do an explicit iter because playing games in the middle
+            g = iter(range(n))
+            for i in g:
+                u = z.pid(pv, dt=dt)
+                self.assertTrue(
+                    math.isclose(u, (setpoint - pv) * dt * (i + 1)))
+
+                if i == freeze_at:
+                    # freeze it and do a while bunch of intervals
+                    ndts = 10
+                    frz.freeze(duration=dt*ndts)
+                    for t in itertools.count():
+                        v = z.pid(pv, dt=dt)
+                        if not math.isclose(u, v):
+                            # presumably freeze ended; check time
+                            self.assertTrue(
+                                math.isclose(t*dt, dt*(ndts+1)))
+                            # at this point one 'dt' got used up so ...
+                            next(g)
+                            break
 
         # Test I_SetpointReset
         def test_i_reset1(self):
