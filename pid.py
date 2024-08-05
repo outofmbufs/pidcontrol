@@ -30,7 +30,7 @@ from collections import deque, ChainMap, Counter
 class PID:
     """Simple PID control."""
 
-    def __init__(self, /, *, Kp=0, Ki=0, Kd=0):
+    def __init__(self, /, *, Kp=0, Ki=0, Kd=0, dt=None):
         """Create a PID controller with the given parameters.
 
         Kp, Ki, Kd        -- weights for P/I/D control signals
@@ -39,6 +39,7 @@ class PID:
         self.Kp = Kp
         self.Ki = Ki
         self.Kd = Kd
+        self.dt = dt
 
         # if different initial conditions are desired, callers should
         # call initial_conditions themselves after this initialization.
@@ -52,7 +53,6 @@ class PID:
         any "kick" from instantaneous pv/setpoint changes.
         """
 
-        self.dt = 0          # corresponding dt (between pid() calls)
         if setpoint is not None:
             self.setpoint = setpoint
 
