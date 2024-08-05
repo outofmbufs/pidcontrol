@@ -86,7 +86,9 @@ The following features are available as `PIDPlus` modifiers:
 
 - **Setpoint Ramping**: This converts an abrupt setpoint change into a series of smaller setpoint changes interpolated (i.e., "ramped") over a configurable time period. Can be helpful in some types of controlled systems.
 
-- **Integration windup protection**: A large setpoint change (or other dynamic conditions) that creates a large error term can cause excessive accumulation in the integration term. The excess will persist (and distort control output) until there has been sufficient cumulative time spent with an opposite error. Among other problems, this can cause overshoot and a slower return to the commanded setpoint. This excessive accumulation is (sometimes) called *integral windup*. Windup protection allows an absolute limit to be set on the integration term value, thus limiting the amount of windup possible. Setting this value correctly requires application-specific knowledge; in particular note that low values will limit the control authority range of the integration term (this is both the point, and the peril, of windup limiting).
+- **Integration Windup Protection**: A large setpoint change (or other dynamic conditions) that creates a large error term can cause excessive accumulation in the integration term. The excess will persist (and distort control output) until there has been sufficient cumulative time spent with an opposite error. Among other problems, this can cause overshoot and a slower return to the commanded setpoint. This excessive accumulation is (sometimes) called *integral windup*. Windup protection allows an absolute limit to be set on the integration term value, thus limiting the amount of windup possible. Setting this value correctly requires application-specific knowledge; in particular note that low values will limit the control authority range of the integration term (this is both the point, and the peril, of windup limiting).
+
+- **Integration freeze***: Allows an application to pause the accumulation of the integration sum and resume it later.
 
 - **Integration reset and pause**: When the setpoint is changed, it may be desirable to reset the integration term back to zero, and optionally cause the integration accumulation to pause for a little while for the other controls to settle into a steadier state. This is another approach to mitigating the same type of problem that windup protection attempts to solve. This solution is close to emulating a new cold-start of the controller with a new setpoint. Note that in some systems the integration term is, in effect, a dynamically-discovered "bias" value (minimum control value needed for equilibrium). In such systems using this modifier can make things worse, not better; obviously this is application-specific.
 
@@ -204,17 +206,15 @@ To limit the (unweighted!) integration term to +/- x:
 
 To limit the (unweighted!) integration term to a closed asymmetric range [lo, hi]:
 
-    w = I_Windup(lo, hi)
-
-It is also allowed to specify one argument, a tuple:
-
     w = I_Windup((lo, hi))
 
-Note that the order of the two values (`lo` and `hi`) does not matter; they will be sorted so that the smaller value will be the low limit and the larger value will be the high limit.
+NOTE: That is a single positional argument, which is a tuple.
+
+The order of the two values (`lo` and `hi`) does not matter; they will be sorted so that the smaller value will be the low limit and the larger value will be the high limit.
 
 In normal use cases the two limits should have opposite signs; however, this is not enforced. If, for example:
 
-    w = I_Windup(6, 9)
+    w = I_Windup((6, 9))
 
 then at startup time unless the first pid() call already gets the integration value all the way up to 6, the integration value will jump up to 6. It works analogously if both limits are negative.
 
@@ -230,6 +230,33 @@ This causes the term to be reset, but sets a zero second delay for resumption of
     m = I_SetpointReset(x)
 
 NOTE: There is no way to ONLY implement a delay, without a reset. Though, of course, users can write their own additional PIDModifier subclasses.
+
+### Integration Freeze
+
+This modification allows an application to freeze the integration term under explicit application control, unfreezing it after a specified time interval or again under explicit control. It takes no arguments:
+
+    m = I_Freeze()
+
+To freeze integration accumulation for an application-specific reason:
+
+    m = I_Freeze()
+    z = PIDPlus(Kp=1, Ki=1, modifiers=m)
+      ...
+    m.freeze()
+
+Note that this does not turn off the "I" term; it simply pauses the accumulation (up or down) of the integration term. The "I" control term will continue to be calculated at the last value before the freeze.
+
+To later unfreeze integration:
+
+    m.unfreeze()
+
+Instead of explicitly unfreezing it, an application can request a freeze for a limited time duration:
+
+    m.freeze(duration=2.5)
+
+will freeze integration for (at least) 2.5 seconds, time as measured by accumulation of subsequent `dt` amounts in subsequent `pid` calls (in other words: it is NOT real/clock time, it is "`pid` accumulated dt" time)
+
+This modifier has been written so that applications can also subclass it and provide a method state() to automate freeze/unfreeze decisions. See the source for how to best provide an alternate state() implementation.
 
 ### History
 
