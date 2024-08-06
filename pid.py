@@ -20,9 +20,10 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-import copy
 import functools
 import itertools
+import contextlib
+import copy
 import re
 from collections import deque, ChainMap, Counter
 
@@ -34,6 +35,7 @@ class PID:
         """Create a PID controller with the given parameters.
 
         Kp, Ki, Kd        -- weights for P/I/D control signals
+        dt                -- [OPTIONAL] default interval
         """
 
         self.Kp = Kp
@@ -41,8 +43,8 @@ class PID:
         self.Kd = Kd
         self.dt = dt
 
-        # if different initial conditions are desired, callers should
-        # call initial_conditions themselves after this initialization.
+        # initial conditions always start pv=0, setpoint=0 but applications
+        # can (and SHOULD) call initial_conditions themselves as needed.
         self.initial_conditions(pv=0, setpoint=0)
 
     def initial_conditions(self, /, *, pv=None, setpoint=None):
@@ -67,12 +69,12 @@ class PID:
         """Return the new commanded control value for the most recent pv/dt.
 
         If dt is omitted the previous dt will be re-used.
-        NOTE: Calling this with a zero dt will fail w/ZeroDivisionError.
-              Startup sequence should be something like:
-                  z = PID(Kp=foo, Ki=bar, Kd=baz)
-                  z.initial_conditions(pv=xxx, setpoint=sss)
-                  (optionally) wait dt seconds    # ok to not wait first time
-                  u = z.pid(newpv, dt)
+
+        Startup sequence should be something like:
+             z = PID(Kp=foo, Ki=bar, Kd=baz)
+             z.initial_conditions(pv=xxx, setpoint=sss)
+             (optionally) wait dt seconds    # ok to not wait first time
+             u = z.pid(newpv, dt)
         """
         self.pv = pv
         if dt is not None:
@@ -90,6 +92,7 @@ class PID:
         return self._u(p, i, d)
 
     def _error(self):
+        """Return the (unweighted) error calculation."""
         return self.setpoint - self.pv
 
     def _proportional(self, e):
@@ -97,7 +100,7 @@ class PID:
         return e
 
     def _integral(self, e):
-        """Return the (unweighted) integral error term."""
+        """Accumulate and return the (unweighted) integral error term."""
         self.integration += (e * self.dt)
         return self.integration
 
@@ -119,6 +122,10 @@ class PID:
         # Thus this uses delta-pv for the derivative term.
         # See D_DeltaE (a PIDModifier) to force use of delta-e instead.
         #
+
+        if self.dt == 0:
+            raise ValueError(f"Cannot compute D term with zero dt")
+
         dpv = (self.previous_pv - self.pv) / self.dt
         self.previous_pv = self.pv
         return dpv
@@ -170,7 +177,7 @@ class PIDPlus(PID):
                 self.modifiers = (modifiers,)
 
         # let each modifier know it has been attached to this pid
-        PIDHookAttached(pid=self).notify(self.modifiers)
+        self.notify(PIDHookAttached())
 
         # Must be after establishing modifiers, because of PIDHookInitial..
         # event that will be triggered in initial_conditions()
@@ -190,8 +197,7 @@ class PIDPlus(PID):
         #       for this event. For example, setpoint ramping could have
         #       been triggered (when the base class changes the setpoint)
         #       and that should be reset by this event.
-        PIDHookInitialConditions(
-            *args, pid=self, **kwargs).notify(self.modifiers)
+        self.notify(PIDHookInitialConditions(*args, **kwargs))
 
     # .setpoint becomes a property so PIDModifiers can be notified of changes
     @property
@@ -210,8 +216,8 @@ class PIDPlus(PID):
             return                    # no notifications on no-change 'changes'
 
         # the notification protocol
-        event = PIDHookSetpointChange(
-            pid=self, sp_prev=sp_prev, sp_set=v).notify(self.modifiers)
+        event = self.notify(
+            PIDHookSetpointChange(sp_prev=sp_prev, sp_set=v))
         self._setpoint = v if event.sp_now is None else event.sp_now
 
     def _calculate(self):
@@ -236,7 +242,7 @@ class PIDPlus(PID):
         # FIRST PIDHookEvent: BaseTerms
         # Run all the BaseTerms events which may (or may not) establish
         # some of the process control values (e/p/i/d/u).
-        cx = PIDHookBaseTerms(pid=self, dt=self.dt).notify(self.modifiers)
+        cx = self.notify(PIDHookBaseTerms(dt=self.dt))
 
         # Anything not supplied by a BaseTerms modifier is calculated
         # the standard way here:
@@ -255,7 +261,7 @@ class PIDPlus(PID):
         # This is where most modifiers do their work, given the "raw"
         # p/i/d/ values (though they potentially were supplied by
         # a modifier, not by the normal calculation).
-        cx = PIDHookModifyTerms(**cx.attrs()).notify(self.modifiers)
+        cx = self.notify(PIDHookModifyTerms(**cx.attrs()))
 
         # Generally 'u' calculation should be overridden in a CalculateU.
         # See, for example, BangBang. But allow for it in ModifyTerms by
@@ -272,10 +278,56 @@ class PIDPlus(PID):
         # THIRD (final) PIDHookEvent: CalculateU
         # This is where a modifier such as BangBang can do violence to 'u'
         # Note: attrs from the ModifyTerms are cloned to the CalculateU
-        cx = PIDHookCalculateU(**cx.attrs()).notify(self.modifiers)
+        cx = self.notify(PIDHookCalculateU(**cx.attrs()))
 
         # Whatever 'u' came through all that ... that's the result!
         return cx.u
+
+    @contextlib.contextmanager
+    def _nestinglevel(self, event):
+        try:
+            try:
+                oldvalue = self._notify_nestinglevel
+            except AttributeError:
+                oldvalue = 0
+            event._notify_nestinglevel = oldvalue + 1
+            self._notify_nestinglevel = oldvalue + 1
+            yield
+        finally:
+            self._notify_nestinglevel = oldvalue
+
+    def notify(self, event, /, *, modifiers=None):
+        """Invoke the notification handler for all modifiers.
+
+        For notational convenience, returns event, for 1-liners like:
+            event = self.notify(PIDHookSomething(foo))
+        when the returned event is needed even after the notify()
+        """
+
+        if modifiers is None:
+            modifiers = self.modifiers
+
+        # automate the setting of 'pid' as a convenience
+        event.pid = self
+
+        # _nestinglevel is the hack so EventPrint (and other such tools)
+        # can distinguish nested events. Helpful for debug/learning/analysis.
+        with self._nestinglevel(event):
+            for nth, m in enumerate(modifiers):
+                h = getattr(m, event.handlername(), getattr(m, 'PH_default'))
+                try:
+                    h(event)        # ... this calls m.PH_foo(event)
+                except HookStop:
+                    # stop propagating; notify the REST of modifiers of THAT
+                    self.notify(
+                        PIDHookHookStopped(
+                            event=event,     # the event that was HookStop'd
+                            stopper=m,       # whodunit
+                            nth=nth,         # in case more than one 'm'
+                            modifiers=modifiers
+                        ), modifiers=modifiers[nth+1:])
+                    break
+        return event            # notational convenience
 
     def __repr__(self):
         s = super().__repr__()
@@ -348,22 +400,27 @@ class PIDPlus(PID):
 class _PIDHookEvent:
     """Base class for events that get generated within PIDPlus."""
 
-    DEFAULTED = {}       # subclasses will override as appropriate
-    READONLY = {'*'}     # by default, everything is readonly
+    # subclasses can/should override these as appropriate
+    DEFAULTED = {}
+    READONLY = {'*'}
 
     @classmethod
     def handlername(cls):
+        """Return deduced handler name for the event class."""
         try:
+            # A subclass can explicitly set a name other than the
+            # automatic name, if it wants to. Return that if it exists.
             return cls.NOTIFYHANDLER
         except AttributeError:
-            # PIDHookFooBar becomes PH_foo_bar
-            # If it doesn't start with PIDHook, None is returned.
-            # Callers need to check for that if they might possibly
-            # be invoking handlername() on this base class or on
-            # an intermediate subclass (which usually is not the case).
+            # Nothing explicitly set; the auto naming works like this:
+            #   PIDHookFooBar becomes PH_foo_bar
+            # Essentially ^PIDHook becomes PH and any upper case
+            # letter becomes an underbar and corresponding lower case.
+            # Subclass names that don't start with PIDHook are not translated
+            # at all; the class should have set NOTIFYHANDLER instead.
             hname = cls.__name__
             if not hname.startswith('PIDHook'):
-                return None
+                raise AttributeError(f"Cannot autoname from {hname}")
             cls.NOTIFYHANDLER = 'PH'
             for c in hname[7:]:
                 if c.isupper():
@@ -371,9 +428,25 @@ class _PIDHookEvent:
                 cls.NOTIFYHANDLER += c.lower()
         return cls.NOTIFYHANDLER
 
+    # read-only for pid attribute is a bit more involved, so that
+    # notify() can supply it later (vs __init__) and it will still
+    # be readonly after that
+    @property
+    def pid(self):
+        try:
+            return self.__hidden_pid   # note: attrs() knows this name
+        except AttributeError:
+            return None
+
+    @pid.setter
+    def pid(self, v):
+        if self.pid is not None:
+            raise TypeError("attempt to write 'pid' a second time")
+        self.__hidden_pid = v          # note: attrs() knows this name
+
     # Property/descriptor implementing read-only-ness
     class _ReadOnlyDescr:
-        _PVTPREFIX = "__PVT_ReadOnly_"
+        _PVTPREFIX = "_PVT_ReadOnly__"
 
         # Factory for annointing PIDHookEvent classes with descriptors
         # for any attributes that are enforced as read-only.
@@ -389,8 +462,9 @@ class _PIDHookEvent:
         # their own instance variable (object attribute) for the underlying
         # readonly value; that attribute name is built using _PVTPREFIX to
         # distinguish it from ordinary (read/write) attrs.
+
         @classmethod
-        def establish_property(cls, attrname, value, /, *, obj=None):
+        def establish_property(cls, attrname, value=None, /, *, obj=None):
             """Factory for creating the property descriptors (dynamically)."""
 
             pidhook_class = obj.__class__   # e.g., PIDHookSetpointChange, etc
@@ -430,6 +504,10 @@ class _PIDHookEvent:
             """Return a dictionary of attributes, finessing readonly stuff."""
             vd = {}
             for a, v in vars(obj).items():
+                # This knows the form of the pid property variable, and
+                # filters it out here
+                if a.endswith('__hidden_pid'):
+                    continue
                 if a.startswith(cls._PVTPREFIX):
                     a = a[len(cls._PVTPREFIX):]
                 vd[a] = v
@@ -448,93 +526,29 @@ class _PIDHookEvent:
             raise TypeError(
                 f"attempted deletion of read-only attr '{self._name}'")
 
-    def __init__(self, /, **kwargs):
-        # READONLY has three implicit semantics:
-        #    - None means set()
-        #    - '*' matches everything
-        #    - 'pid' is hardwired as always read-only
-        #
-        try:
-            readonlys = self.__RO
-        except AttributeError:
-            readonlys = self.__ro()
+    def __init__(self, /, *, pid=None, **kwargs):
 
+        # NOT SUPPOSED TO SET .pid this way, so check for that
+        if pid is not None:
+            raise ValueError(f"Must not specify pid (={pid}) in kwargs")
+        #
+        # READONLY only affects attributes established by __init__ (either
+        # as explicit keyword args or via DEFAULTED). Attributes set later
+        # are read-write REGARDLESS being in READONLY. This is by design.
+        #
+        # If READONLY is '*', it means "all" (as defined above) are READONLY.
+        # NOTE: 'pid' has several special treatments, to allow for it
+        #       to be automatically set in notify() and THEN be read-only.
         for k, v in ChainMap(kwargs, self.DEFAULTED).items():
-            if {k, '*'} & readonlys:
+            if k != 'pid' and ({k, '*'} & self.READONLY):
                 self._ReadOnlyDescr.establish_property(k, v, obj=self)
             else:
                 setattr(self, k, v)
 
-    # in effect this is a class-level initialization for the __RO attribute
-    # which combines the semantics of None (shorthand for set()) and
-    # automatically makes 'pid' readonly whether specified or not.
-    @classmethod
-    def __ro(cls):
-        if cls.READONLY is None:
-            cls.__RO = {'pid'}
-        else:
-            cls.__RO = cls.READONLY | {'pid'}
-        return cls.__RO
-
-    # Decorator to count recursion levels.
-    # Used on .notify(), primarily for debugging/logging; helps for
-    # analyzing nested notifications. Example: PH_base_terms in
-    # SetpointRamp can cause a nested PH_setpoint_change event.
-    #
-    # This is not written thread-safely if there are multiple PIDPlus
-    # objects simultaneously operating from different threads (because
-    # the hidden recursion count is stored per-method in a closure)
-    @staticmethod
-    def _track_recursion(*, argname):
-        def _deco(f):
-            # putting the count into a dictionary (vs the more-obvious
-            # scalar/nonlocal way) simplifies forming the args for
-            # the _wrapped invocation of f() (i.e., via **countarg_d)
-            countarg_d = {argname: 0}
-
-            @functools.wraps(f)
-            def _wrapped(*args, **kwargs):
-                countarg_d[argname] += 1
-                try:
-                    rv = f(*args, **countarg_d, **kwargs)
-                finally:
-                    countarg_d[argname] -= 1
-                return rv
-            return _wrapped
-        return _deco
-
-    @_track_recursion(argname="_nestinglevel")
-    def notify(self, modifiers, /, *, _nestinglevel=0):
-        """Invoke the notification handler for all modifiers.
-
-        For notational convenience, returns self, for 1-liners like:
-            event = PIDHookSomething(foo).notify(modlist)
-        when the returned event is needed even after the notify()
-
-        NOTE: _nestinglevel argument is intended for internal use.
-              It tracks event nesting, useful for logging/debug.
-        """
-
-        self._notify_nestinglevel = _nestinglevel
-
-        for nth, m in enumerate(modifiers):
-            h = getattr(m, self.handlername(), getattr(m, 'PH_default'))
-            try:
-                h(self)        # ... this calls m.PH_foo(event)
-            except HookStop:
-                # stop propagating; notify the REST of the modifiers of THAT
-                PIDHookHookStopped(
-                    event=self,        # the event that was HookStop'd
-                    stopper=m,         # whodunit
-                    nth=nth,           # in case more than one 'm'
-                    modifiers=modifiers
-                ).notify(modifiers[nth+1:])
-                break
-        return self            # notational convenience
-
     def attrs(self):
         """Built-in vars returns gibberish for readonly's; this doesn't."""
-        return self._ReadOnlyDescr.attrs(self)
+        return {a: v for a, v in self._ReadOnlyDescr.attrs(self).items()
+                if not a.endswith("__pid")}
 
     def __repr__(self):
         s = self.__class__.__name__ + "("
@@ -555,8 +569,6 @@ class _PIDHookEvent:
         pre = ""
         post = ")"
         for a, v in self.attrs().items():
-            if a == 'pid':
-                continue
             if a == '_notify_nestinglevel':
                 if v > 1:
                     post += f" NESTED({v})"
@@ -569,15 +581,17 @@ class _PIDHookEvent:
         return s + post
 
 
-# The _PIDHookEvent .__init__() and .notify() methods provide a framework so
-# that typically the specific event types are just subclasses with a
-# few class variables:
+# PIDHookEvent .__init__() provides a framework so that typically the
+# specific event types are just subclasses with a few class variables:
 #
 #    DEFAULTED -- dictionary of default attribute names/values that
 #                 will be used (if no explicit values given in init)
 #    READONLY  -- set() ... names of attributes that are read-only.
 #                 The default value is {'*'} which means all attributes
 #                 will be read-only. NOTE: 'pid' is hard-wired read-only.
+#
+# Note that the implementation of READONLY is actually "write once" so
+# the attributes are generally established at __init__ time.
 #
 # The "DEFAULTED" is an alternate way to implement what would otherwise
 # be an __init()__ in each subclass with a custom signature and super() call
@@ -1073,6 +1087,17 @@ class SetpointRamp(PIDModifier):
         if self._threshold > 0:
             s += f", threshold={self._threshold}"
         return s + ")"
+
+
+#
+# Probably not spectacularly useful, but as an example:
+# Allow dt=0 so long as Kd=0 (i.e., there would be no derivative term)
+#
+class DTZero(PIDModifier):
+    """Allow dt==0 if Kd==0 (so D term becomes zero)."""
+    def PH_base_terms(self, event):
+        if event.dt == 0 and event.pid.Kd == 0:
+            event.d = 0
 
 
 #
@@ -1635,8 +1660,10 @@ if __name__ == "__main__":
             # tests that the property magic for read-only attrs
             # works properly in the face of multiple hook objects
             # (this was once a bug)
-            e1 = PIDHookCalculateU(pid='bozo', e=1)
-            e2 = PIDHookCalculateU(pid='bonzo', e=2)
+            e1 = PIDHookCalculateU(e=1)
+            e1.pid = 'bozo'
+            e2 = PIDHookCalculateU(e=2)
+            e2.pid = 'bonzo'
             self.assertEqual(e1.pid, 'bozo')
             self.assertEqual(e1.e, 1)
             self.assertEqual(e2.pid, 'bonzo')
@@ -1644,10 +1671,11 @@ if __name__ == "__main__":
 
         def test_pidreadonly(self):
             class NothingReadonly(_PIDHookEvent):
-                READONLY = None
+                READONLY = set()
 
-            # .pid is always readonly
-            ebozo = NothingReadonly(pid='bozo', e=1)
+            # .pid is always readonly after set once
+            ebozo = NothingReadonly(e=1)
+            ebozo.pid = 'bozo'
             with self.assertRaises(TypeError):
                 ebozo.pid = 'bonzo'
             self.assertEqual(ebozo.pid, 'bozo')
@@ -1886,8 +1914,10 @@ if __name__ == "__main__":
             def _all_notification_method_names(cls):
                 for subcls in cls.__subclasses__():
                     yield from _all_notification_method_names(subcls)
-                    if (nm := subcls.handlername()) is not None:
-                        yield nm
+                    try:
+                        yield subcls.handlername()
+                    except AttributeError:
+                        pass     # e.g., _PIDHookCalc framework class
 
             METHODNAMES = set(_all_notification_method_names(_PIDHookEvent))
             for nm in METHODNAMES:
