@@ -883,7 +883,7 @@ class I_Freeze(PIDModifier):
 
     def PH_base_terms(self, event):
         if self.state(event):
-            event.i = event.pid.integration
+            event.i = event.pid.integration   # just keep the current term
 
 
 class I_SetpointReset(PIDModifier):

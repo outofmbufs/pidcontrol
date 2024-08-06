@@ -35,7 +35,11 @@ Choosing reasonable values for Kp/Ki/Kd is critical for proper operation; howeve
 
 
 ## Running a control loop
-The method `pid` takes two arguments, a current process variable value and a time interval (the delta-t between this pv measurement and prior). In a typical use the interval is constant, so in pseudo-code a common coding idiom is:
+The method `pid` takes two arguments, a current process variable value and a time interval `dt` (the delta-t between this pv measurement and prior).
+
+**Note regarding dt**: The `pid` method calculates the resulting control variable using the `dt` given, without regard to whether that corresponds to true elapsed time. Implementing (or measuring) appropriate intervals and computing the value of `dt` to supply is the application's responsibility.
+
+In a typical use the interval is constant, so in pseudo-code a common coding idiom is:
 
     z = PID(Kp=foo, Ki=bar, Kd=baz)     # constants need to be determined
     interval = 0.1                      # 100msec
@@ -44,6 +48,12 @@ The method `pid` takes two arguments, a current process variable value and a tim
         pv = ... read process value from the controlled device ...
         cv = z.pid(pv, dt=interval)
         ... send cv to the controlled device ...
+
+If the `dt` truly never changes it only needs to be supplied once, either in the first `pid` call or optionally at object creation time:
+
+    z = PID(Kp=foo, Ki=bar, Kd=baz, dt=whammo)
+
+and it can be left out of subsequent `pid` calls.
 
 ## Ti, Td vs Ki, Kd
 
@@ -93,6 +103,8 @@ The following features are available as `PIDPlus` modifiers:
 - **Integration reset and pause**: When the setpoint is changed, it may be desirable to reset the integration term back to zero, and optionally cause the integration accumulation to pause for a little while for the other controls to settle into a steadier state. This is another approach to mitigating the same type of problem that windup protection attempts to solve. This solution is close to emulating a new cold-start of the controller with a new setpoint. Note that in some systems the integration term is, in effect, a dynamically-discovered "bias" value (minimum control value needed for equilibrium). In such systems using this modifier can make things worse, not better; obviously this is application-specific.
 
 - **History Recording**: This modifier doesn't affect any algorithm operation but provides a lookback of controller computations. Can be useful during tuning and debugging.
+
+- **Event Printing**: Like History Recording but print()s events directly. Easier to use for simple debugging or learning.
 
 - **Bang Bang**: This is probably rarely a useful modification; it was implemented primarily as a test of the PIDModifier system to see how far customization features could be pushed. This alters the behavior of the PID controller such that the control variable is always returned as a fully "on" value or a fully "off" value.
 
@@ -537,9 +549,9 @@ An easy way to get a better feel for what the event stream does is to use the `E
     PIDHookInitialConditions(setpoint=5, pv=2)
 
     >>> cv = z.pid(2, dt=1)
-    PIDHookBaseTerms(e=None, p=None, i=None, d=None, u=None)
-    PIDHookModifyTerms(e=3, p=3, i=3, d=0.0, u=None)
-    PIDHookCalculateU(e=3, p=3, i=3, d=0.0, u=6.3)
+    PIDHookBaseTerms(e=None, p=None, i=None, d=None, u=None, dt=1)
+    PIDHookModifyTerms(e=3, p=3, i=3, d=0.0, u=None, dt=1)
+    PIDHookCalculateU(e=3, p=3, i=3, d=0.0, u=6.3, dt=1)
 
     >>> cv
     6.3
@@ -642,10 +654,58 @@ READ-WRITE ATTRIBUTES:
 
 READ-ONLY ATTRIBUTES:
 - `pid` -- the PIDPlus object
+- `dt` -- the `dt` value supplied for this calculation
 
-The idea of this event is that the framework is about to calculate `e`, `p`, `i`, and `d` the usual way; these are the so-called _base_ terms. However, a modifier can substitute an alternate value for any of those terms; it does so by setting the corresponding attribute in this event to something other than None. Doing that for `e` will override the internal _error() calculation and this `e` value will be passed to the other p/i/d internal methods. Setting any of `p`, `i`, or `d` to not-None will similarly bypass the corresponding internal method for that term and substitute the value given. Setting `u` to anything not-None will short-circuit the whole shebang and cause that value to be the final control value returned by `.pid()`. 
+In the base `PID` (i.e., not `PIDPlus`) class, the framework calculates `e`, `p`, `i`, and `d` by invoking corresponding internal methods for each one:
 
-Consider this trivial example:
+    # illustrative, not the real framework code
+    e = calculate_error()
+    p = calculate_proportional(e)
+    i = calculate_integration(e)
+    d = calculate_derivative(e)
+
+In the `PIDPlus` class, a `PIDHookBaseTerms` event is created before those calculations, and modifiers that handle the event can affect the calculations. If the handler sets a non-None value for any of `event.e`, `event.p`, `event.i`, or `event.d` then those values will be used INSTEAD OF calling the internal method. Thus the `PIDPlus` framework code is approximately:
+
+    # illustrative, not the real code
+    event = PIDHookBaseTerms()    # e/p/i/d/u all set to None
+    notify_modifiers(event)       # modifiers may alter event.e, event.i, etc
+
+    if event.e is None:
+        e = calculate_error()
+    else:
+        e = event.e
+
+    if event.p is None:
+        p = calculate_proportional(e)
+    else:
+        p = event.p
+
+    ... etc (for 'i' and 'd') ...
+
+
+The handler can, for example, supply an `event.e` value, which will prevent the `calculate_error()` from occuring, and the supplied `e` value will be used instead for the subsequent calculations.
+
+For example, here is another (better) way to implement a modifier allowing the setpoint to be set in the range of 0 to 100 (i.e., a "percent") but act as if it is in the range 0 to 1:
+
+    class SetpointPercent(PIDModifier):
+        def PH_base_terms(self, event):
+            event.e = (event.pid.setpoint / 100) - event.pid.pv
+
+and the `event.e` value will be used to compute `p`, `i`, and `d` values.
+
+**PIDHookBaseTerms vs PIDHookModifyTerms**
+
+Some modifiers are best implemented via this `PIDHookBaseTerms` event and some are better implemented via `PIDHookModifyTerms` (see next); the decision primarily rests on two factors:
+
+- Setting values via the `PIDHookBaseTerms` event prevents the side-effects of some of the calculations. For example, the internal `i` calculation causes the internal integration term to accumulate (i.e., adds `e * dt` to it). Similarly, the internal `d` calculation has a side effect of updating the running derivative computation. If the semantics of the modifier require preventing those side effects, the "base" event is the right one to handle. See, for example, the implementation of `I_Freeze` which handles `PIDHookBaseTerms` to set `event.i` and prevent the framework from invoking the internal method that would change the integration sum.
+
+- For some modifiers it is preferable to allow the base terms to be calculated the usual way and THEN override them with different values. Modifiers requiring those semantics should handle the `PIDHookModifyTerms` event.
+
+In some cases it may be necessary to handle both and/or the third choice (`PIDCalculateU`).
+
+**Setting event.u**
+
+If any handler sets a non-None `u` attribute in a `PIDHookBaseTerms`, `PIDHookModifyTerms`, or `PIDHookCalculateU` event, that value will override the internal `u` calculation and become the return value from the `pid()` method. The typical place to override `u` this way is in a `PIDHookCalculateU` handler; however, it is legal to do it in `PIDHookBaseTerms` or `PIDHookModifyTerms`. For example:
 
     class UBash(PIDModifier):
         def PH_base_terms(self, event):
@@ -656,23 +716,12 @@ Consider this trivial example:
 
 This will print 0.666 even though the control variable would otherwise normally be calculated to be "0" in this situation as the pv is equal to the (default) setpoint and only Kp is non-zero.
 
-Bashing `u` this early in the sequence is unlikely to be useful, but later in the sequence (i.e, in a `PH_compute_u` handler) `u` could be usefully modified.
+NOTE: Bashing `u` in a `PIDHookBaseTerms` does not prevent the framework from invoking the underlying calculations for `e`, `p`, `i`, or `d` (see pseudo-code earlier in this section and note that there is no test for `u`). In particular, the integration accumulation (for `i`) will still happen and the running derivative calculation will still be updated. See `PIDHookCalculateU` which is the more-common event to handle for overriding the `u` calculation.
 
-Given this hook point, here is a better way to implement "setpoint as a percent"that was shown with `PIDHookSetpointChange`. This modifier sets the `e` value, which is normally computed as:
-
-    e = setpoint - pv
-
-but this overrides it as shown, to allow the setpoint to be scaled up by 100 (i.e., expressed as a percent) in the attribute, but be treated as a value between 0 and 1 in the error term calculation:
-
-    class SetpointPercent(PIDModifier):
-        def PH_base_terms(self, event):
-            event.e = (event.pid.setpoint / 100) - event.pid.pv
-
-The underlying PIDPlus code only uses the setpoint in the `e` calculation, so by doing this calculation here the setpoint can be treated as scaled by 100.
 
 ### PIDHookModifyTerms (handler name: PH_modify_terms)
 
-This event occurs immediately after all the base terms are established, whether they were obtained by the built-in calculations or from values provided by `PH_base_terms` handlers.
+This event occurs immediately after all the base terms are established, whether they were obtained by the built-in calculations or from values provided by `PIDHookBaseTerms` handlers.
 
 READ-WRITE ATTRIBUTES:
 - `p` -- the current candidate (unweighted) proportional term value. NEVER None.
@@ -681,21 +730,30 @@ READ-WRITE ATTRIBUTES:
 - `u` -- the control value to ultimately return. Default: None
 
 READ-ONLY ATTRIBUTES:
-- `e` -- the current candidate error value. Will NEVER be None.
 - `pid` -- the PIDPlus object
+- `dt` -- the `dt` value supplied for this calculation
+- `e` -- the current candidate error value. Will NEVER be None.
 
-Essentially this gives handlers of this event a second swing at the parameters, with a full view of all values whether supplied by the internal calculations or by `PH_base_terms` handlers. The `p`, `i`, and `d` attributes will never be None here (as the framework will fill them in if they were not provided in a `PH_base_term`). The `u` parameter will normally be None, as it is a rare use-case for a `PH_base_terms` to want to supply a meaningful `u` at that stage; but, theoretically, it could be non-None here. A `PH_modify_terms` handler can also modify `u` here, though it may be more typical to do it in the PIDHookCalculateU stage which is explicitly set up for that.
+The `e`, `p`, `i`, and `d` values come from the results of the `PIDHookBaseTerms` event and/or subsequent internal calculations. Note that those four attributes are NEVER None at this point because if they remained None after the `PIDHookBaseTerms` event they were subsequently filled in by the framework calculations.
 
-The `e` term can not be modified here as it has already been used by this point.
+The `e` term is read-only here because changing it would no longer have any effect; it was (potentially) used to calculate `p`, `i`, and `d` and has no further effect on any internal calculations.
+
+The `u` term is still typically None here unless a `PIDHookBaseTerms` handler set it (in which case it propagates to this `PIDHookModifyTerms` event). As with `PIDHookBaseTerms`, it is possible for a handler to set `u` here but it is more typical to do that in `PIDHookCalculateU` at the end.
+
+Essentially this event gives handlers a chance to see the results of the "base" calculations and modify those results as appropriate. See, for example, the implementation of `I_Windup`.
+
 
 ### PIDHookCalculateU (handler name: PH_calculate_u)
-The last of the three events during `.pid()` calculation. At this stage a candidate `u` value has been computed from the p/i/d terms. Only the `u` value can be overridden at this stage; the remaining attributes are read-only.
+The last of the three events during `.pid()` calculation. At this stage a candidate `u` value has been computed from the other attributes.
+
+Only the `u` value can be overridden at this stage; the remaining attributes are read-only.
 
 READ-WRITE ATTRIBUTES:
 - `u` -- the candidate control value to ultimately return. Will NEVER be None.
 
 READ-ONLY ATTRIBUTES:
 - `pid` -- the PIDPlus object
+- `dt` -- the `dt` value supplied for this calculation
 - `e` -- for reference: the error value. NEVER None.
 - `p` -- for reference: the (unweighted) proportional term value. NEVER None.
 - `i` -- for reference: the (unweighted) integral term value. NEVER None.
