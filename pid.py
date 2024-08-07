@@ -662,7 +662,7 @@ class PIDModifier:
     # subclass itself does not handle those events).
     # --------------------------------------------------------------------
 
-
+    #
     # A subclass can set:
     #        PH_attached = PIDModifier.attached_once_check
     # to prevent object re-use across multiple pids. Or, of course, it
@@ -1092,16 +1092,19 @@ class SetpointRamp(PIDModifier):
 
 
 class DeadBand(PIDModifier):
-    def __init__(self, minchange, *args, **kwargs):
+    def __init__(self, biggerthan, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.minchange = minchange
+        self.biggerthan = biggerthan
 
     def PH_calculate_u(self, event):
         try:
-            if abs(event.u - self.previous_u) < self.minchange:
-                event.u = self.previous_u
-            else:
+            if abs(event.u - self.previous_u) > self.biggerthan:
                 self.previous_u = event.u
+            else:
+                # make a copy of the proposed 'u' really only so that
+                # it would get logged if followed by, e.g., PIDHistory
+                event.in_deadband_u = event.u
+                event.u = self.previous_u
         except AttributeError:
             self.previous_u = event.u
 
@@ -1765,6 +1768,47 @@ if __name__ == "__main__":
             u = z.pid(0, dt=0.01)
             self.assertEqual(z.setpoint, 50)
             self.assertEqual(u, 50 / 100)
+
+        def test_deadband(self):
+            # test the DeadBand modifier
+
+            # in this first test all should be within the deadband
+            db = 25
+            z = PIDPlus(Kp=1, modifiers=DeadBand(db))
+            setpoint = 50
+            pv0 = 60
+            z.initial_conditions(pv=pv0, setpoint=setpoint)
+            cv0 = z.pid(pv0, dt=1)
+            for deltapv in range(2*db):
+                pv = pv0 - db + deltapv
+                cv = z.pid(pv, dt=1)
+                with self.subTest(deltapv=deltapv, cv=cv, pv=pv):
+                    self.assertTrue(cv == cv0)
+
+            # now test more varying results - semi-random
+            pv0 = 60
+            pvs = [pv0, pv0 - db, pv0 + db, pv0 - (db - 1), pv0 + (db - 1),
+                   pv0 + (db + 1), 17, 22, 1, 76, 56, 35, 89, 22, 96, 3, 79,
+                   69, 83, 86, 92, 67, 45, 36, 44, 92, 36, 1, 25, 1, 97, 18,
+                   72, 65, 4, 16, 2, 92, 14, 40, 72, 73, 1, 34, 38, 48, 30,
+                   10, 54, 72, 21, 38, 32, 26, 73, 63, 37, 61, 46, 9, 83, 26,
+                   79, 83, 36, 53, 93, 94, 78, 51, 92, 85, 15, 93, 13, 18,
+                   86, 28, 36, 1, 68, 30, 51, 41, 85, 6, 74, 34, 96, 15, 50,
+                   96, 14, 54, 30, 24, 55, 4, 55, 84, 92, 69, 70, 58, 11]
+
+            z.initial_conditions(pv=pv0, setpoint=setpoint)
+            newcv = True
+            cv0 = z.pid(pv0, dt=1)
+            for i, pv in enumerate(pvs):
+                cv = z.pid(pv, dt=1)
+                with self.subTest(i=i, pv=pv, cv=cv, cv0=cv0):
+                    if abs(pv - pv0) > db:
+                        print("NEW at ", i)
+                        self.assertNotEqual(cv0, cv)
+                        cv0 = cv
+                        pv0 = pv
+                    else:
+                        self.assertEqual(cv0, cv)
 
         def test_history_sizing(self):
             # test the various 'n'/resize/since features of PIDHistory
