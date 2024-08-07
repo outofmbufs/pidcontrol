@@ -655,16 +655,18 @@ class HookStop(Exception):
 class PIDModifier:
     """Base class for the 'modifiers' used in a PIDPlus."""
 
-    # It's important this base class have no explicit handlers so that
-    # a subclass PH_default will get to see everything it should see.
-    #
-    # So, rather than this being a default PH_attached handler that a
-    # subclass could override, it is named attached_once_check. A
-    # subclass can do PH_attached = PIDModifier.attached_once_check
-    # if it wants this as a PH_attached method, or it can of course
-    # also call it from its own PH_attached method via super().
-    #
-    # This disallows more than one PH_attached in all circumstances.
+    # -------------------------- IMPORTANT -----------------------------
+    # This base class MUST NOT have any explicit PH_foo handlers (other
+    # than PH_default). If it does, they prevent a subclass PH_default
+    # from seeing those events (which it would expect to see if the
+    # subclass itself does not handle those events).
+    # --------------------------------------------------------------------
+
+
+    # A subclass can set:
+    #        PH_attached = PIDModifier.attached_once_check
+    # to prevent object re-use across multiple pids. Or, of course, it
+    # can simply invoke this from its own PH_attached if it wants.
     #
     def attached_once_check(self, event):
         """Disallow more than one PH_attached in any circumstance."""
@@ -1087,6 +1089,25 @@ class SetpointRamp(PIDModifier):
         if self._threshold > 0:
             s += f", threshold={self._threshold}"
         return s + ")"
+
+
+class DeadBand(PIDModifier):
+    def __init__(self, minchange, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.minchange = minchange
+
+    def PH_calculate_u(self, event):
+        try:
+            if abs(event.u - self.previous_u) < self.minchange:
+                event.u = self.previous_u
+            else:
+                self.previous_u = event.u
+        except AttributeError:
+            self.previous_u = event.u
+
+    def PH_initial_conditions(self, event):
+        if hasattr(self, 'previous_u'):
+            del self.previous_u
 
 
 #
