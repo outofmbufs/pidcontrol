@@ -102,6 +102,8 @@ The following features are available as `PIDPlus` modifiers:
 
 - **Integration reset and pause**: When the setpoint is changed, it may be desirable to reset the integration term back to zero, and optionally cause the integration accumulation to pause for a little while for the other controls to settle into a steadier state. This is another approach to mitigating the same type of problem that windup protection attempts to solve. This solution is close to emulating a new cold-start of the controller with a new setpoint. Note that in some systems the integration term is, in effect, a dynamically-discovered "bias" value (minimum control value needed for equilibrium). In such systems using this modifier can make things worse, not better; obviously this is application-specific.
 
+- **Dead Band**: If the control variable changes by less than a specified amount, "snap it back" to the previous value. That same value will keep getting returned until the deviation exceeds the specified "dead band" value. Useful for some processes where constantly updating the control value is undesirable, though of course this limits control precision.
+
 - **History Recording**: This modifier doesn't affect any algorithm operation but provides a lookback of controller computations. Can be useful during tuning and debugging.
 
 - **Event Printing**: Like History Recording but print()s events directly. Easier to use for simple debugging or learning.
@@ -269,6 +271,69 @@ Instead of explicitly unfreezing it, an application can request a freeze for a l
 will freeze integration for (at least) 2.5 seconds, time as measured by accumulation of subsequent `dt` amounts in subsequent `pid` calls (in other words: it is NOT real/clock time, it is "`pid` accumulated dt" time)
 
 This modifier has been written so that applications can also subclass it and provide a method state() to automate freeze/unfreeze decisions. See the source for how to best provide an alternate state() implementation.
+
+### DeadBand
+In some use cases it is not a good idea to make a large number of small changes to the control variable. The `DeadBand` modifier causes all changes below the specified amount to "snap back" to whatever the current (last returned from `pid`) control value `u` is.
+
+There is one argument, the size of the dead band. It is applied symmetrically.
+
+For example:
+
+    m = DeadBand(0.05)
+    z = PIDPlus(Kp=1, modifiers=m)
+    z.initial_conditions(pv=0.75, setpoint=0.5)
+    for pv in (0.75, 0.75, 0.75):
+       print(z.pid(pv, dt=1))
+
+will print:
+
+    -0.25
+    -0.25
+    -0.25
+
+because the process variable (pv) is 0.25 above the setpoint and it is the same on every call.
+
+If the application wants to know whether it "should" write a `pid` result to the process under control, it can use:
+
+    m.deadbanded()
+
+Adding this to the above example gives:
+
+    m = DeadBand(0.05)
+    z = PIDPlus(Kp=1, modifiers=m)
+    z.initial_conditions(pv=0.75, setpoint=0.5)
+    for pv in (0.75, 0.75, 0.75):
+       print(z.pid(pv, dt=1), m.deadbanded())
+
+resulting in:
+
+    -0.25 False
+    -0.25 True
+    -0.25 True
+
+In some applications it is perfectly ok to write the control variable each time; for others the `deadbanded` method can be used to know whether there is no point in updating the mechanism.
+
+A more interesting example:
+
+    m = DeadBand(0.05)
+    z = PIDPlus(Kp=1, modifiers=m)
+    z.initial_conditions(pv=0.75, setpoint=0.5)
+    # notice these pv values are different from above
+    for pv in (0.75, 0.76, 0.77, 0.71, 0.77, 0.81):
+        print(z.pid(pv, dt=1), m.deadbanded())
+
+prints:
+
+    -0.25 False
+    -0.25 True
+    -0.25 True
+    -0.25 True
+    -0.25 True
+    -0.31 False
+
+The semantics of this can be confusing. Take a look at the case of pv going from `0.71` to `0.77` -- that is a difference of more than 0.05 and would cause an ("unsnapped") `u` difference of more than 0.05 but yet it still gets snapped. This is because it doesn't matter if the newest unsnapped value is more than 0.05 away from the previous UNSNAPPED value; the comparison is between the new value and the previous "snapped" value (which presumably is the last value commanded to the plant under control by the application).
+
+As shown in those examples, after an `initial_conditions` call the first value will always be considered "new" even if the pv matches the value in the `initial_conditions` call. This is just how it works; thus there may be one extra (spurious) control write in such cases.
 
 ### History
 
@@ -455,7 +520,9 @@ For example:
 
 will print:
 
-    PIDHookSetpointChange(sp_now=None, sp_prev=0, sp_set=7)
+    PIDHookSetpointChange(sp=None, sp_from=0, sp_to=7)
+
+See the section on `PIDHookSetpointChange` for details of how that event operates.
 
 A modification can declare its own `__init__` method if it needs additional parameters. Best practice includes using *args/**kwargs and super() to continue the `__init__` calls up the subclass chain. So, as a trivial example, to add a 'foo' parameter to the ExampleModifier shown above:
 
@@ -472,7 +539,7 @@ A modification can declare its own `__init__` method if it needs additional para
 
 and this will print:
 
-    'bozo' : PIDHookSetpointChange(sp_now=None, sp_prev=0, sp_set=7)
+    'bozo' : PIDHookSetpointChange(sp=None, sp_from=0, sp_to=7)
 
 **PH_default**
 
@@ -531,7 +598,7 @@ As an example of setting attributes for logging purposes:
 
 this will print
 
-    PIDHookSetpointChange(sp_now=None, sp_prev=0, sp_set=7, xyz=bozo)
+    PIDHookSetpointChange(sp=None, sp_from=0, sp_to=7, xyz=bozo)
 
 **Suggestion for learning/debugging**
 
@@ -608,9 +675,21 @@ READ-ONLY ATTRIBUTES:
 
 As noted above, this event is generated **after** the initial_conditions method has modified the `pid` object. If it makes sense to allow a modifier to be "reset" midstream, the initializations necessary to start afresh should go in a `PH_initial_conditions` handler.
 
+NOTE: Creating a PIDPlus object implicitly calls `initial_conditions` to set both the `pv` and the `setpoint` to zero, as illustrated by this example:
+
+    m = EventPrint()
+    z = PIDPlus(modifiers=m)
+
+which will print:
+
+    PIDHookAttached()
+    PIDHookInitialConditions(setpoint=0, pv=0)
+
+Note also that this setpoint assignment via `initial_conditions` (whether implicit at creation time or explicitly via calling `initial_conditions`) does NOT generate a `PIDHookSetpointChange` event.
+
 ### PIDHookSetpointChange: (handler method: PH_setpoint_change)
 
-Generated when the setpoint attribute is set on a PIDPlus object. a
+Generated when the setpoint attribute is set on a PIDPlus object.
 
 NOTE: This event is NOT generated if the setpoint change happens as part of an initial_conditions() call.
 
@@ -619,20 +698,40 @@ This event is generated BEFORE any modifications in the underlying PIDPlus objec
 There is one read/write attribute and the rest are read-only.
 
 READ-WRITE ATTRIBUTES:
-- `sp_now` -- If the handler sets this attribute to something other than None (its default), then this value is used to set the setpoint. 
+- `sp` -- see discussion
 
 READ-ONLY ATTRIBUTES:
 - `pid` -- the PIDPlus object
-- `sp_prev` -- the setpoint value prior to any modification.
-- `sp_set` -- the setpoint value that was requested to be set by the application (see discussion below). 
+- `sp_from` -- see discussion
+- `sp_to` -- see discussion
 
-As noted above, this event is generate **before** the assignment to the setpoint attribute. This allows handlers to change the value that gets assigned, by setting `sp_now` to something other than `sp_set` (`sp_set` itself is read-only)
+To illustrate this event consider this sequence:
+
+    m = EventPrint()
+    z = PIDPlus(modifiers=m)
+    z.setpoint = 17
+
+This will print:
+
+    PIDHookAttached()
+    PIDHookInitialConditions(setpoint=0, pv=0)
+    PIDHookSetpointChange(sp=None, sp_from=0, sp_to=17)
+
+The `PIDHookInitialConditions` was implicit in the object creation as already discussed.
+
+The `PIDHookSetpointChange` event contains three setpoint attributes:
+
+- `sp_from` is the current (pre-assignment) setpoint value (0 in this example).
+- `sp_to` is the value being assigned (17 is this example).
+- `sp` is how handlers can change the value being assigned to something else. If this remains None, `sp_to` becomes the new setpoint; if `sp` is not None, then it (`sp`) is used for the new setpoint value.
+
+Both `sp_from` and `sp_to` are read-only. If a handler wishes to alter the value assigned, it must set `sp` which will then be used for the setpoint value overriding the value in `sp_to`.
 
 As a trivial example:
 
     class SetpointPercent(PIDModifier):
         def PH_setpoint_change(self, event):
-            event.sp_now = event.sp_set / 100
+            event.sp = event.sp_to / 100
 
 This would allow users to use "percentages" for the setpoint, e.g.:
 
@@ -641,6 +740,8 @@ This would allow users to use "percentages" for the setpoint, e.g.:
     print(z.setpoint)
 
 This will print 0.50 as the resulting setpoint (whether it is a good idea to implement something like this is up for debate, but it's a simple example). Another example later will show another (better) way to accomplish this without the mismatch between written and read .setpoint values.
+
+This event is the mechanism by which the `SetpointRamp` modifier operates.
 
 ### PIDHookBaseTerms (handler name: PH_base_terms)
 Generated at the start of the calculations related to a `pid()` call.
