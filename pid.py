@@ -20,7 +20,6 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-import functools
 import itertools
 import contextlib
 import copy
@@ -208,17 +207,16 @@ class PIDPlus(PID):
     def setpoint(self, v):
         # this dance avoids generating spurious notification during __init__
         try:
-            sp_prev = self._setpoint
+            sp_from = self._setpoint
         except AttributeError:        # happens during __init__ only
-            sp_prev = self._setpoint = v
+            sp_from = self._setpoint = v
 
-        if v == sp_prev:
+        if v == sp_from:
             return                    # no notifications on no-change 'changes'
 
         # the notification protocol
-        event = self.notify(
-            PIDHookSetpointChange(sp_prev=sp_prev, sp_set=v))
-        self._setpoint = v if event.sp_now is None else event.sp_now
+        event = self.notify(PIDHookSetpointChange(sp_from=sp_from, sp_to=v))
+        self._setpoint = v if event.sp is None else event.sp
 
     def _calculate(self):
         """Run PIDModifier protocol and return control value ('u')."""
@@ -308,7 +306,10 @@ class PIDPlus(PID):
             modifiers = self.modifiers
 
         # automate the setting of 'pid' as a convenience
-        event.pid = self
+        # NOTE: if this was copied (e.g., ModifyTerms from BaseTerms)
+        #       then pid can already be there and cannot be set again.
+        if not hasattr(event, 'pid'):
+            event.pid = self
 
         # _nestinglevel is the hack so EventPrint (and other such tools)
         # can distinguish nested events. Helpful for debug/learning/analysis.
@@ -428,25 +429,10 @@ class _PIDHookEvent:
                 cls.NOTIFYHANDLER += c.lower()
         return cls.NOTIFYHANDLER
 
-    # read-only for pid attribute is a bit more involved, so that
-    # notify() can supply it later (vs __init__) and it will still
-    # be readonly after that
-    @property
-    def pid(self):
-        try:
-            return self.__hidden_pid   # note: attrs() knows this name
-        except AttributeError:
-            return None
-
-    @pid.setter
-    def pid(self, v):
-        if self.pid is not None:
-            raise TypeError("attempt to write 'pid' a second time")
-        self.__hidden_pid = v          # note: attrs() knows this name
-
     # Property/descriptor implementing read-only-ness
     class _ReadOnlyDescr:
         _PVTPREFIX = "_PVT_ReadOnly__"
+        _WRITEONCE = object()
 
         # Factory for annointing PIDHookEvent classes with descriptors
         # for any attributes that are enforced as read-only.
@@ -486,7 +472,7 @@ class _PIDHookEvent:
                 # The name is arbitrarily constructed this way and saved
                 # ONCE in the descriptor for this attribute.
                 descriptor._name = cls._PVTPREFIX + attrname
-
+                descriptor._publicname = attrname
                 # and this establishes the data descriptor on the class
                 setattr(pidhook_class, attrname, descriptor)
 
@@ -504,10 +490,6 @@ class _PIDHookEvent:
             """Return a dictionary of attributes, finessing readonly stuff."""
             vd = {}
             for a, v in vars(obj).items():
-                # This knows the form of the pid property variable, and
-                # filters it out here
-                if a.endswith('__hidden_pid'):
-                    continue
                 if a.startswith(cls._PVTPREFIX):
                     a = a[len(cls._PVTPREFIX):]
                 vd[a] = v
@@ -516,39 +498,53 @@ class _PIDHookEvent:
         def __get__(self, obj, objtype=None):
             if obj is None:
                 return self
-            return getattr(obj, self._name)
+            v = getattr(obj, self._name)
+            if v is self._WRITEONCE:
+                raise AttributeError(
+                    f"{self._publicname} hasn't been set yet")
+            return v
 
         def __set__(self, obj, value):
-            raise TypeError(
-                f"write to read-only attr '{self._name}' not allowed")
+            if getattr(obj, self._name) is self._WRITEONCE:
+                setattr(obj, self._name, value)
+            else:
+                raise TypeError(
+                    f"write to read-only attribute "
+                    f"'{self._publicname}' not allowed")
 
         def __delete__(self, obj):
             raise TypeError(
-                f"attempted deletion of read-only attr '{self._name}'")
+                f"deletion of read-only attribute "
+                f"'{self._publicname}' not allowed")
 
-    def __init__(self, /, *, pid=None, **kwargs):
+    def __init__(self, /, **kwargs):
 
-        # NOT SUPPOSED TO SET .pid this way, so check for that
-        if pid is not None:
-            raise ValueError(f"Must not specify pid (={pid}) in kwargs")
-        #
-        # READONLY only affects attributes established by __init__ (either
-        # as explicit keyword args or via DEFAULTED). Attributes set later
-        # are read-write REGARDLESS being in READONLY. This is by design.
-        #
-        # If READONLY is '*', it means "all" (as defined above) are READONLY.
-        # NOTE: 'pid' has several special treatments, to allow for it
-        #       to be automatically set in notify() and THEN be read-only.
+        # Also, 'pid' is hardwired read-only
+        try:
+            readonly = self.READONLY | {'pid'}
+        except TypeError:
+            # raise something more helpful if READONLY is not a set
+            raise ValueError(
+                f"READONLY must be a set, not '{self.READONLY}'") from None
+
+        # NOTE: READONLY={'*'} only affects attributes established
+        #       by __init__() either as explicit kwargs or via DEFAULTED.
+        #       This is by design.
         for k, v in ChainMap(kwargs, self.DEFAULTED).items():
-            if k != 'pid' and ({k, '*'} & self.READONLY):
+            if {k, '*'} & readonly:
                 self._ReadOnlyDescr.establish_property(k, v, obj=self)
             else:
                 setattr(self, k, v)
 
+        # attrs in READONLY by name but not yet supplied become write-once
+        for k in readonly:
+            if k != '*' and not hasattr(self, k):
+                self._ReadOnlyDescr.establish_property(
+                    k, self._ReadOnlyDescr._WRITEONCE, obj=self)
+
     def attrs(self):
         """Built-in vars returns gibberish for readonly's; this doesn't."""
-        return {a: v for a, v in self._ReadOnlyDescr.attrs(self).items()
-                if not a.endswith("__pid")}
+        return {a: v for a, v in self._ReadOnlyDescr.attrs(self).items()}
 
     def __repr__(self):
         s = self.__class__.__name__ + "("
@@ -587,17 +583,31 @@ class _PIDHookEvent:
 #    DEFAULTED -- dictionary of default attribute names/values that
 #                 will be used (if no explicit values given in init)
 #    READONLY  -- set() ... names of attributes that are read-only.
-#                 The default value is {'*'} which means all attributes
-#                 will be read-only. NOTE: 'pid' is hard-wired read-only.
+#                 The default value is {'*'} which means (almost) all
+#                 attributes (see discussion below) will be read-only.
 #
-# Note that the implementation of READONLY is actually "write once" so
-# the attributes are generally established at __init__ time.
+# A few notes on READONLY:
+#  - If an attribute name is in READONLY but not supplied at __init__
+#    time either as a kwarg or via DEFAULTED, then it becomes a
+#    "write-once" attribute. The application can write a value to this
+#    attribute later (once), but once written it cannot be changed.
+#    Attempting to read an attribute that is in WRITEONCE state (i.e.,
+#    hasn't been set yet) will raise AttributeError like any other
+#    uninitialized attribute.
 #
-# The "DEFAULTED" is an alternate way to implement what would otherwise
-# be an __init()__ in each subclass with a custom signature and super() call
-# for *args/**kwargs. Subclasses can still do it that way if desired; but the
-# DEFAULTED mechanism makes trivial cases trivial and avoids boilerplate
-# like: "super().__init__(*args, arg1=arg1, arg2=arg2, ... **kwargs)"
+#  - Attribute 'pid' is hardwired read-only regardless of whether it is
+#    in READONLY (explicitly as 'pid' or implicitly via '*').
+#
+# Notes on DEFAULTED:
+#
+#  - "DEFAULTED" is an alternate for a boilerplate __init__() that would
+#    provide defaults via the argument signature. Subclasses can still do
+#    it that way if desired; but the DEFAULTED mechanism makes trivial
+#    cases trivial and vs boilerplate:
+#         def __init__(self, *args, foo=17, bar='bozo', **kwargs):
+#             super().__init__(*args, **kwargs)
+#             self.foo = foo
+#             self.bar = bar
 #
 # The name of the corresponding notify handler will be automatically
 # inferred from the subclass name, IF it starts with 'PIDHook'.
@@ -622,8 +632,8 @@ class PIDHookInitialConditions(_PIDHookEvent):
 
 
 class PIDHookSetpointChange(_PIDHookEvent):
-    DEFAULTED = dict(sp_now=None)
-    READONLY = {'sp_prev', 'sp_set'}     # sp_now will be read/write
+    DEFAULTED = dict(sp=None)
+    READONLY = {'sp_from', 'sp_to'}     # sp will be read/write
 
 
 # Base for BaseTerms, ModifyTerms, CalculateU. Establish defaults.
@@ -1011,21 +1021,21 @@ class SetpointRamp(PIDModifier):
         # NO-OP conditions:
         #   ramp parameter zero,
         #   no change in setpoint
-        if self._ramptime == 0 or event.sp_set == self._target_sp:
+        if self._ramptime == 0 or event.sp_to == self._target_sp:
             return
 
         # if the change is within threshold, set immediate, cancel ramping
-        if abs(event.sp_set - self.pid.setpoint) < self._threshold:
-            self._noramp(setpoint=event.sp_set)
+        if abs(event.sp_to - self.pid.setpoint) < self._threshold:
+            self._noramp(setpoint=event.sp_to)
             return
 
-        self._start_sp = event.sp_prev
-        self._target_sp = event.sp_set
+        self._start_sp = event.sp_from
+        self._target_sp = event.sp_to
         self._countdown = self._ramptime
         clampf = min if self._start_sp < self._target_sp else max
         self._clamper = lambda x: clampf(x, self._target_sp)
         if not self._hiddenramp:
-            event.sp_now = self._ramped()     # make it ramp
+            event.sp = self._ramped()     # make it ramp
 
     def _set_real_setpoint(self, v):
         """Set the real setpoint in the underlying pid, bypasing ramping."""
@@ -1691,6 +1701,24 @@ if __name__ == "__main__":
             self.assertEqual(z.last_pid, (0, 0, 17))
             self.assertEqual(u, 18)
 
+        # a test that READONLY applies to an attribute even if the attribute
+        # is not established at __init__ time -- it is "write once"
+        def test_writeonce(self):
+            class FooEvent(_PIDHookEvent):
+                READONLY = {'foo'}
+
+            f = FooEvent()
+            with self.assertRaises(AttributeError):
+                x = f.foo       # hasn't been set yet, should fail
+
+            f.foo = 'fooby'
+            self.assertEqual(f.foo, 'fooby')
+
+            with self.assertRaises(TypeError):
+                f.foo = 'this fails because now read-only'
+
+            self.assertEqual(f.foo, 'fooby')
+
         def test_multi_readonly(self):
             # tests that the property magic for read-only attrs
             # works properly in the face of multiple hook objects
@@ -1705,15 +1733,39 @@ if __name__ == "__main__":
             self.assertEqual(e2.e, 2)
 
         def test_pidreadonly(self):
-            class NothingReadonly(_PIDHookEvent):
+            class NothingReadOnly(_PIDHookEvent):
                 READONLY = set()
 
+            class PidReadOnly(_PIDHookEvent):
+                READONLY = {'pid'}       # unnecessary but make sure ok
+
+            class AllRO(_PIDHookEvent):
+                READONLY = {'*'}
+
+            class P(_PIDHookEvent):
+                pass
+
             # .pid is always readonly after set once
-            ebozo = NothingReadonly(e=1)
-            ebozo.pid = 'bozo'
-            with self.assertRaises(TypeError):
-                ebozo.pid = 'bonzo'
-            self.assertEqual(ebozo.pid, 'bozo')
+            pidval = 'bozo'
+            aval = 1
+            testargs = (
+                dict(),
+                dict(a=aval),
+                dict(pid=pidval),
+                dict(a=aval, pid=pidval)
+                )
+
+            for klass in (NothingReadOnly, PidReadOnly, AllRO, P):
+                for args in testargs:
+                    with self.subTest(klass=klass, args=args):
+                        ebozo = klass(**args)
+                        if 'pid' not in args:
+                            ebozo.pid = pidval
+                        if 'a' in args:
+                            self.assertEqual(ebozo.a, aval)
+                        with self.assertRaises(TypeError):
+                            ebozo.pid = object()    # i.e., something else
+                        self.assertEqual(ebozo.pid, pidval)
 
         def test_attrpropagation(self):
             # Modifiers can add more attributes during the pre/mid/post
@@ -1753,7 +1805,7 @@ if __name__ == "__main__":
             # just testing an example given in the README.md
             class SetpointPercent(PIDModifier):
                 def PH_setpoint_change(self, event):
-                    event.sp_now = event.sp_set / 100
+                    event.sp = event.sp_to / 100
 
             z = PIDPlus(Kp=1, modifiers=SetpointPercent())
             z.setpoint = 50
@@ -1853,14 +1905,14 @@ if __name__ == "__main__":
 
             # and see if all 100 are there (this is also a test of "since")
             for i, e in enumerate(h.since(last)):
-                self.assertEqual(e.sp_set, i)
+                self.assertEqual(e.sp_to, i)
 
             # resize to the new size...
             h.resize(saveonly)
 
             # and now it should only be the last 10 in there
             for i, e in enumerate(h.history):
-                self.assertEqual(e.sp_set, i + maxsetpoints - saveonly)
+                self.assertEqual(e.sp_to, i + maxsetpoints - saveonly)
 
             # really shouldn't do this kind of hack, supplying bogus events
             # as the 'preserve' events, but test it anyway...
@@ -1879,7 +1931,7 @@ if __name__ == "__main__":
                     self.clown = name
 
                 def PH_setpoint_change(self, event):
-                    event.sp_now = self.clown
+                    event.sp = self.clown
 
             h1 = PIDHistory(10)
             h2 = PIDHistory(10)
@@ -1897,9 +1949,9 @@ if __name__ == "__main__":
             self.assertTrue(id(e1) != id(e2))
             self.assertTrue(id(e1) != id(e3))
             self.assertTrue(id(e2) != id(e3))
-            self.assertEqual(e1.sp_now, None)
-            self.assertEqual(e2.sp_now, 'bozo')
-            self.assertEqual(e3.sp_now, 'bonzo')
+            self.assertEqual(e1.sp, None)
+            self.assertEqual(e2.sp, 'bozo')
+            self.assertEqual(e3.sp, 'bonzo')
             with self.assertRaises(TypeError):
                 e1.pid = None
 
