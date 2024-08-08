@@ -565,6 +565,8 @@ class _PIDHookEvent:
         pre = ""
         post = ")"
         for a, v in self.attrs().items():
+            if a == 'pid':
+                continue
             if a == '_notify_nestinglevel':
                 if v > 1:
                     post += f" NESTED({v})"
