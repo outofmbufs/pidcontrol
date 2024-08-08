@@ -553,6 +553,7 @@ Thus, for example:
 
         def PH_default(self, event):
             print(f"In PH_default, got: {event.__class__.__name__}")
+
     z = PIDPlus(modifiers=ExampleTwo())
     z.setpoint = 7
 
@@ -655,7 +656,7 @@ Thus a modifier can limit itself to one pid like this:
 
 will result in an exception:
 
-    TypeError: multiple attachment attempted: '<__main__.OnlyOne>'
+    TypeError: multiple attachment attempted: '<__main__.OnlyOne...>'
 
 If the modifier itself doesn't need to do anything other than limit attachment it can simply set `PH_attached` to the attached_once_check method directly:
 
