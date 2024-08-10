@@ -281,21 +281,9 @@ class PIDPlus(PID):
         # Whatever 'u' came through all that ... that's the result!
         return cx.u
 
-    @contextlib.contextmanager
-    def _nestinglevel(self, event):
-        try:
-            try:
-                oldvalue = self._notify_nestinglevel
-            except AttributeError:
-                oldvalue = 0
-            event._notify_nestinglevel = oldvalue + 1
-            self._notify_nestinglevel = oldvalue + 1
-            yield
-        finally:
-            self._notify_nestinglevel = oldvalue
-
     def notify(self, event, /, *, modifiers=None):
-        """Invoke the notification handler for all modifiers.
+        """Invoke the notification handler for (by default) all modifiers.
+        An explicit (usually tail-end subset) modifiers list can be given.
 
         For notational convenience, returns event, for 1-liners like:
             event = self.notify(PIDHookSomething(foo))
@@ -311,23 +299,20 @@ class PIDPlus(PID):
         if not hasattr(event, 'pid'):
             event.pid = self
 
-        # _nestinglevel is the hack so EventPrint (and other such tools)
-        # can distinguish nested events. Helpful for debug/learning/analysis.
-        with self._nestinglevel(event):
-            for nth, m in enumerate(modifiers):
-                h = getattr(m, event.handlername(), getattr(m, 'PH_default'))
-                try:
-                    h(event)        # ... this calls m.PH_foo(event)
-                except HookStop:
-                    # stop propagating; notify the REST of modifiers of THAT
-                    self.notify(
-                        PIDHookHookStopped(
-                            event=event,     # the event that was HookStop'd
-                            stopper=m,       # whodunit
-                            nth=nth,         # in case more than one 'm'
-                            modifiers=modifiers
-                        ), modifiers=modifiers[nth+1:])
-                    break
+        for nth, m in enumerate(modifiers):
+            h = getattr(m, event.handlername(), getattr(m, 'PH_default'))
+            try:
+                h(event)        # ... this calls m.PH_foo(event)
+            except HookStop:
+                # stop propagating; notify the REST of modifiers of THAT
+                self.notify(
+                    PIDHookHookStopped(
+                        event=event,     # the event that was HookStop'd
+                        stopper=m,       # whodunit
+                        nth=nth,         # in case more than one 'm'
+                        modifiers=modifiers
+                    ), modifiers=modifiers[nth+1:])
+                break
         return event            # notational convenience
 
     def __repr__(self):
@@ -558,18 +543,12 @@ class _PIDHookEvent:
     #    * The .pid object is omitted entirely
     #    * Anything whose __str__ matches r'<[a-z_]*\.[^ ]* object at'
     #      becomes <.__class__.__name__>
-    #    * the _notify_nestinglevel is omitted unless > 1 and even then
-    #      it is reported separately: "NESTED(n)"
     def __str__(self):
         s = self.__class__.__name__ + "("
         pre = ""
         post = ")"
         for a, v in self.attrs().items():
             if a == 'pid':
-                continue
-            if a == '_notify_nestinglevel':
-                if v > 1:
-                    post += f" NESTED({v})"
                 continue
             vstr = str(v)
             if re.match(r'\<[a-z_]*\.[^ ]* object at', vstr):
@@ -789,11 +768,76 @@ class PIDHistory(PIDModifier):
             s += pre + "detail=True"
         return s + ")"
 
-
+# EventPrint is a helpful debugging/learning tool.
+# Once upon a time this started out as simple as:
+#       class EventPrint(PIDModifier):
+#           def PH_default(self, event):
+#               print(event)
+#
+# but of course over time the tyranny of "wouldn't it be nice if..."
+# has led to this implementation. On the plus side, there are two
+# very nice capabilities:
+#    nesting - if an event is generated from within the context of
+#              an ongoing notification, its display will be indented.
+#    name    - since it is possible to put more than one EventPrint into
+#              the modifier list, each line can have a string prefix.
+#
+# The reason to put EventPrint into the modifier list more than once is
+# to see the before/after effects of what the modifiers in between do.
+#
+# The nesting feature performs some pretty outrageous violence on the
+# modifiers attribute; if that is a problem the nesting display feature
+# can be disabled via 'show_nesting=False' in __init__().
+#
 class EventPrint(PIDModifier):
-    """Simple-minded event printer, helpful for debug and learning."""
+    """Event printer, helpful for debug and learning."""
+    def __init__(self, *args, name="", show_nesting=True, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.name = name
+        self.show_nesting = show_nesting
+
+    class __FrontNest(PIDModifier):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._nesting = 0
+
+        def PH_default(self, event):
+            self._nesting += 1
+
+    class __BackNest(PIDModifier):
+        def __init__(self, front, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.front = front
+
+        def PH_default(self, event):
+            # note that this works even if event is PIDHookHookStopped
+            # (i.e., some handler in between raised HookStop). This
+            # still gets invoked and the event itself is of no concern.
+            self.front._nesting -= 1
+
+    def PH_attached(self, event):
+        """Perform outrageous violence to make nesting display work."""
+        # have to do this manually because PH_default won't see this event
+        self.printevent(event)
+
+        # put the bookend modifiers in place (only once though!)
+        if self.show_nesting:
+            if isinstance(event.pid.modifiers[0], self.__FrontNest):
+                self.front = event.pid.modifiers[0]
+            else:
+                self.front = self.__FrontNest()
+                b = self.__BackNest(self.front)
+                event.pid.modifiers = (self.front, *event.pid.modifiers, b)
+
+    def printevent(self, event):
+        try:
+            indent = "  " * (self.front._nesting - 1)
+        except AttributeError:
+            indent = ""
+        print(f"{self.name}{indent}{event}")
+
     def PH_default(self, event):
-        print(event)
+        self.printevent(event)
 
 
 class I_Windup(PIDModifier):
@@ -2111,20 +2155,18 @@ if __name__ == "__main__":
         def test_hh(self):
             # a test of HookStop being raised within HookStop handlers
             class Stopper(PIDModifier):
-                def __init__(self, *args, ut, **kwargs):
+                def __init__(self, nth, *args, ut, **kwargs):
                     super().__init__(*args, **kwargs)
                     self.ut = ut             # unittest object
+                    self.nth = nth
                     self.got_ic = False
                     self.got_atd = False
 
                 def PH_hook_stopped(self, event):
-                    # pluck the nesting level from the event internal attr
-                    nestinglevel = event._notify_nestinglevel
-
-                    # first off this should not occur at nestinglevel 1
+                    # first off this should not occur at nth 0
                     # because it is always a result of a prior modifier
                     # raising HookStop within a handler
-                    self.ut.assertTrue(nestinglevel > 1)
+                    self.ut.assertTrue(self.nth > 0)
 
                     # compute the implied depth from the HookStopped chain
                     foo = event
@@ -2134,21 +2176,17 @@ if __name__ == "__main__":
                         foo = foo.event
 
                     # and compare to nestinglevel (which starts at 1)
-                    self.ut.assertEqual(hh_depth+1, nestinglevel)
+                    self.ut.assertEqual(hh_depth, self.nth)
                     raise HookStop
 
                 def PH_attached(self, event):
-                    # pluck the nesting level from the event internal attr
-                    nestinglevel = event._notify_nestinglevel
-                    self.ut.assertEqual(nestinglevel, 1)
+                    self.ut.assertEqual(self.nth, 0)
                     self.ut.assertFalse(self.got_atd)
                     self.got_atd = True
                     raise HookStop
 
                 def PH_initial_conditions(self, event):
-                    # pluck the nesting level from the event internal attr
-                    nestinglevel = event._notify_nestinglevel
-                    self.ut.assertEqual(nestinglevel, 1)
+                    self.ut.assertEqual(self.nth, 0)
                     self.ut.assertTrue(self.got_atd)
                     self.ut.assertFalse(self.got_ic)
                     self.got_ic = True
@@ -2157,8 +2195,7 @@ if __name__ == "__main__":
                 def PH_default(self, event):
                     raise TypeError("DEFAULT")
 
-            mods = [Stopper(ut=self) for _ in range(10)]
-            z = PIDPlus(modifiers=mods)
+            z = PIDPlus(modifiers=[Stopper(i, ut=self) for i in range(10)])
             # NOTE: the test runs in the handlers, implicitly, and just
             #       creating the PIDPlus triggers attached and init_conds.
 
