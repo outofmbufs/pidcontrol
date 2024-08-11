@@ -313,6 +313,17 @@ class PIDPlus(PID):
                         modifiers=modifiers
                     ), modifiers=modifiers[nth+1:])
                 break
+            except Exception as exc:
+                # some modifier bailed out. It is unlikely to be helpful
+                # to let other modifiers know, but... do it anyway
+                self.notify(PIDHookFailure(
+                        event=event,     # the event that caused exc
+                        exc=exc,         # the exception
+                        stopper=m,       # whodunit
+                        nth=nth,         # in case more than one 'm'
+                        modifiers=modifiers
+                    ), modifiers=modifiers[nth+1:])
+                raise
         return event            # notational convenience
 
     def __repr__(self):
@@ -608,6 +619,10 @@ class PIDHookHookStopped(_PIDHookEvent):
     pass
 
 
+class PIDHookFailure(_PIDHookEvent):
+    pass
+
+
 class PIDHookInitialConditions(_PIDHookEvent):
     DEFAULTED = dict(setpoint=None)
 
@@ -768,33 +783,36 @@ class PIDHistory(PIDModifier):
             s += pre + "detail=True"
         return s + ")"
 
+
 # EventPrint is a helpful debugging/learning tool.
 # Once upon a time this started out as simple as:
 #       class EventPrint(PIDModifier):
 #           def PH_default(self, event):
 #               print(event)
 #
-# but of course over time the tyranny of "wouldn't it be nice if..."
-# has led to this implementation. On the plus side, there are two
-# very nice capabilities:
-#    nesting - if an event is generated from within the context of
-#              an ongoing notification, its display will be indented.
-#    name    - since it is possible to put more than one EventPrint into
-#              the modifier list, each line can have a string prefix.
+# but of course over time the tyranny of "wouldn't it be nice if..." has led
+# to this implementation. On the plus side, it has more capabilities:
 #
-# The reason to put EventPrint into the modifier list more than once is
-# to see the before/after effects of what the modifiers in between do.
+# NESTING: By default, events will be indented if they were generated
+#          by handlers causing nested events (this happens, for example,
+#          in SetpointRamp). Because the way that works involves some
+#          amazing violence on the modifiers list, it can also be turned
+#          off by specifying 'no_nest=True' (default is False).
 #
-# The nesting feature performs some pretty outrageous violence on the
-# modifiers attribute; if that is a problem the nesting display feature
-# can be disabled via 'show_nesting=False' in __init__().
+# PREFIX:  Since it is possible to put more than one EventPrint in a
+#          modifiers list, prefix="foo" allows specifying text to be
+#          put at the front of each EventPrint output line.
+#
+# LOGGING: Code has been structured so that printevent() can be easily
+#          overridden in a subclass if, for example, it would rather
+#          log the output than simply print() it.
 #
 class EventPrint(PIDModifier):
     """Event printer, helpful for debug and learning."""
-    def __init__(self, *args, name="", show_nesting=True, **kwargs):
+    def __init__(self, *args, prefix="", no_nest=False, **kwargs):
         super().__init__(*args, **kwargs)
-        self.name = name
-        self.show_nesting = show_nesting
+        self.prefix = prefix
+        self.no_nest = no_nest
 
     class __FrontNest(PIDModifier):
         def __init__(self, *args, **kwargs):
@@ -821,7 +839,7 @@ class EventPrint(PIDModifier):
         self.printevent(event)
 
         # put the bookend modifiers in place (only once though!)
-        if self.show_nesting:
+        if not self.no_nest:
             if isinstance(event.pid.modifiers[0], self.__FrontNest):
                 self.front = event.pid.modifiers[0]
             else:
@@ -829,12 +847,17 @@ class EventPrint(PIDModifier):
                 b = self.__BackNest(self.front)
                 event.pid.modifiers = (self.front, *event.pid.modifiers, b)
 
-    def printevent(self, event):
+    def nesting_level(self, event):
         try:
-            indent = "  " * (self.front._nesting - 1)
+            return self.front._nesting
         except AttributeError:
-            indent = ""
-        print(f"{self.name}{indent}{event}")
+            return 1
+
+    # override this to log, or do something else, if desired
+    # Can still call nesting_level() if need to perform indentation
+    def printevent(self, event):
+        indent = "  " * (self.nesting_level(event) - 1)
+        print(f"{self.prefix}{indent}{event}")
 
     def PH_default(self, event):
         self.printevent(event)
@@ -1830,22 +1853,56 @@ if __name__ == "__main__":
             z = PIDPlus(modifiers=FooMod())
             z.pid(1, dt=0.01)         # that this doesn't bomb is the test
 
-        def test_nestinglevel_exceptions(self):
-            # make sure that _notify_nestinglevel in events always starts
-            # at 1, even after something has bailed out via exception.
-            # (Was a bug during initial development)
-            class BadMod(PIDModifier):
-                def PH_default(self, event):
-                    raise TypeError("OH MY")
-            with self.assertRaises(TypeError):
-                # that alone will cause a PIDHookAttached,
-                # which will bail out of the BadMod w/TypeError
-                z = PIDPlus(Kp=1, modifiers=BadMod())
+        def test_handler_exceptions(self):
+            # if handlers cause exceptions (other than HookStop) in
+            # all likelihood the error is unrecoverable; however, the
+            # notify system tries to at least let the other handlers
+            # know when this happens. This tests that.
 
-            # now make sure nesting still starts at 1
+            class TestException(Exception):
+                pass
+
+            class BadAttach(PIDModifier):
+                def PH_attached(self, event):
+                    raise TestException("LIONS AND TIGERS")
+
+            class BadModify(PIDModifier):
+                def PH_modify_terms(self, event):
+                    raise TestException("AND BEARS, OH MY!")
+
+            class NoPrint(EventPrint):
+                def __init__(self, *args, **kwargs):
+                    super().__init__(*args, **kwargs)
+                    self._nestings = []
+
+                def printevent(self, event):
+                    self._nestings.append((event, self.nesting_level(event)))
+
+            with self.assertRaises(TestException):
+                h = PIDHistory()
+                z = PIDPlus(Kp=1, modifiers=(BadAttach(), h))
+
+            self.assertEqual(h.eventcounts[PIDHookFailure.handlername()], 1)
+
+            # now make sure nesting still starts at 1 after an exc
             h = PIDHistory()
-            z = PIDPlus(Kp=1, modifiers=h)
-            self.assertEqual(h.history[0]._notify_nestinglevel, 1)
+            npr = NoPrint()
+            mods = (h, BadModify(), SetpointRamp(2), npr)
+            z = PIDPlus(Kp=1, modifiers=mods)
+            z.setpoint = 10
+            for _ in range(4):
+                with self.assertRaises(TestException):
+                    z.pid(0, dt=0.25)
+
+            # after all that ... make sure the PIDHookBaseTerms all started
+            # at level 1 (others should start there too but this is what is
+            # checked here). To test this test, an incorrect implementation
+            # of PIDHookFailure logic in notify() was tried just to see that
+            # this would indeed catch that sort of problem.
+            #
+            for e, lvl in npr._nestings:
+                if e.__class__ is PIDHookBaseTerms:
+                    self.assertEqual(lvl, 1)
 
         def test_readme_1(self):
             # just testing an example given in the README.md
@@ -2065,6 +2122,7 @@ if __name__ == "__main__":
                 def __init__(self, n=0, *args, **kwargs):
                     super().__init__(n, *args, **kwargs)
                     self.hookstopped = Counter()
+                    self.failures = 0
 
                 def _gotevent(self, event):
                     super().PH_default(event)    # let PIDHistory count it
@@ -2074,6 +2132,10 @@ if __name__ == "__main__":
                 def PH_hook_stopped(self, event):
                     stopped = event.event
                     self.hookstopped[stopped.handlername()] += 1
+
+                # same deal for Failure (which never happens)
+                def PH_failure(self, event):
+                    self.failures += 1
 
                 def PH_default(self, event):
                     raise TypeError("DEFAULT HANDLER INVOKED")
@@ -2129,6 +2191,9 @@ if __name__ == "__main__":
                 if mod is stopper:
                     beforestopper = False
                     continue
+
+                # none of them should have seen a PH_failure
+                self.assertEqual(mod.failures, 0)
 
                 if beforestopper:
                     # In the ones preceding the stopper, each event
