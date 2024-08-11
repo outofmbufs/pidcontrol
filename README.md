@@ -145,7 +145,7 @@ The specific PIDModifier class names and __init__ signatures are:
 
 ### EventPrint
 
-This is a trivially-simple modifier that will print out events as they occur. It can be helpful in debugging and also for learning about how the event system works when writing a custom PIDModifier.
+This modifier prints out events as they occur. It can be helpful in debugging and also for learning about how the event system works when writing a custom PIDModifier.
 
 Example:
 
@@ -156,6 +156,50 @@ will immediately print:
 
     PIDHookAttached()
     PIDHookInitialConditions(setpoint=0, pv=0)
+
+Any "nested" events will be displayed indented accordingly. Nested events are those generated from within a handler for another event, except that PIDHookHookStopped is never considered to be "nested" (as it replaces the event notification already in progress, rather than nesting recursively within it).
+
+For example:
+
+    from pid import PIDPlus, EventPrint, SetpointRamp
+    print("Setting up:")
+    z = PIDPlus(Kp=10, modifiers=(EventPrint(), SetpointRamp(2)))
+    z.setpoint = 10
+    print("\nRunning pid()")
+    z.pid(0, dt=0.25)
+
+will print:
+
+    Setting up:
+    PIDHookAttached()
+    PIDHookInitialConditions(setpoint=0, pv=0)
+    PIDHookSetpointChange(sp=None, sp_from=0, sp_to=10)
+
+    Running pid()
+    PIDHookBaseTerms(e=None, p=None, i=None, d=None, u=None, dt=0.25)
+      PIDHookSetpointChange(sp=None, sp_from=0.0, sp_to=1.25)
+    PIDHookModifyTerms(e=1.25, p=1.25, i=0.3125, d=0.0, u=None, dt=0.25)
+    PIDHookCalculateU(e=1.25, p=1.25, i=0.3125, d=0.0, u=12.5, dt=0.25)
+
+This demonstrates that the SetpointChange event in the "Running pid()" section was generate from within a BaseTerms handler (which in this case is part of how SetpointRamp is implemented).
+
+The indentation feature can be turned off: `EventPrint(no_nest=True)`.
+
+A prefix can be added to each line: `EventPrint(prefix='blahblah')`. This might be useful if using more than one EventPrint in a single modifiers list.
+
+To do something other than print, subclass the modifier and override the `printevent()` method (see the source). This might be a useful way to log events rather than print them, for example:
+
+    import logging
+
+    class LogEvents(EventPrint):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.logger = logging.getLogger('foo')
+            logging.basicConfig(filename='foo.log', level=logging.DEBUG)
+
+        def printevent(self, event):
+            self.logger.debug(f"{event}")
+
 
 ### SetpointRamp
 
@@ -501,6 +545,7 @@ The event classes and their corresponding handler names are:
 | PIDHookModifyTerms       | PH_modify_terms       |
 | PIDHookCalculateU        | PH_calculate_u        |
 | PIDHookHookStopped       | PH_hook_stopped       |
+| PIDHookFailure           | PH_failure            |
 | * (see discussion) *     | PH_default            |
 
 
@@ -876,3 +921,20 @@ Notes:
 
 - Similarly, it is legal, but almost certainly questionable, for a PH_hook_stopped handler to try to circumvent the HookStop by peering into the `event` attribute; note that because recursion is allowed such code needs to be able to follow the entire event.event.event... chain until it gets down to the original (i.e., non-recursive) event.
 
+### PIDHookFailure (handler name: PH_failure)
+
+PIDModifiers "should not" cause any exceptions other than HookStop. If such an exception does occur, the framework will catch the exception and send a PIDHookFailure event to all of the remaining handlers. The semantics are very similar to that of the HookStop exception: the remaining modifiers that were in line to be notified of this event will be notified with a `PIDHookFailure` instead.
+
+READ-ONLY ATTRIBUTES:
+- `event`-- The event in which the exception happened.
+- `exc`  -- The exception itself
+- `stopper` -- The `PIDModifier` object that raised `exc`.
+- `nth` -- Same as in `PIDHookHookStopped`.
+- `modifiers` -- Same as in `PIDHookHookStopped`.
+
+Notes:
+- There's no guarantee the system is in any known state. Modifiers simply should not be causing miscellaneous exceptions.
+
+- After the last modifier is notified of the `PIDHookFailure` the `exc` will be reraised and bubble all the way out to the main application code. So, for example, if the exception happened from within a `pid()` method call, the exception will bubble out of that call.
+
+- Probably the most realistic use for a PH_failure handler would be for logging/debugging.
