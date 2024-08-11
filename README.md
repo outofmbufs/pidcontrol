@@ -181,7 +181,7 @@ will print:
     PIDHookModifyTerms(e=1.25, p=1.25, i=0.3125, d=0.0, u=None, dt=0.25)
     PIDHookCalculateU(e=1.25, p=1.25, i=0.3125, d=0.0, u=12.5, dt=0.25)
 
-This demonstrates that the SetpointChange event in the "Running pid()" section was generate from within a BaseTerms handler (which in this case is part of how SetpointRamp is implemented).
+This demonstrates that the SetpointChange event in the "Running pid()" section was generated from within a BaseTerms handler (which in this case is part of how SetpointRamp is implemented).
 
 The indentation feature can be turned off: `EventPrint(no_nest=True)`.
 
