@@ -814,7 +814,7 @@ class EventPrint(PIDModifier):
         self.prefix = prefix
         self.no_nest = no_nest
 
-    class __FrontNest(PIDModifier):
+    class NestingFront(PIDModifier):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             self._nesting = 0
@@ -822,7 +822,7 @@ class EventPrint(PIDModifier):
         def PH_default(self, event):
             self._nesting += 1
 
-    class __BackNest(PIDModifier):
+    class NestingBack(PIDModifier):
         def __init__(self, front, *args, **kwargs):
             super().__init__(*args, **kwargs)
             self.front = front
@@ -840,11 +840,11 @@ class EventPrint(PIDModifier):
 
         # put the bookend modifiers in place (only once though!)
         if not self.no_nest:
-            if isinstance(event.pid.modifiers[0], self.__FrontNest):
+            if isinstance(event.pid.modifiers[0], self.NestingFront):
                 self.front = event.pid.modifiers[0]
             else:
-                self.front = self.__FrontNest()
-                b = self.__BackNest(self.front)
+                self.front = self.NestingFront()
+                b = self.NestingBack(self.front)
                 event.pid.modifiers = (self.front, *event.pid.modifiers, b)
 
     def nesting_level(self, event):
@@ -1853,7 +1853,67 @@ if __name__ == "__main__":
             z = PIDPlus(modifiers=FooMod())
             z.pid(1, dt=0.01)         # that this doesn't bomb is the test
 
-        def test_handler_exceptions(self):
+        def test_handler_exceptions_1(self):
+            # a small test demonstrating PIDHookFailure handling but
+            # also demonstrating what happens if a PIDHookFailure handler
+            # itself causes another exception (which, by design, bubbles out)
+
+            class TestException(Exception):
+                def __init__(self, *args, marker=None, **kwargs):
+                    super().__init__(*args, **kwargs)
+                    self.test_exception_marker = marker
+
+            ff_marker = object()
+            bf_marker = object()
+
+            class FailFail(PIDModifier):
+                def PH_failure(self, event):
+                    raise TestException(marker=ff_marker)
+
+            class BaseFail(PIDModifier):
+                def PH_base_terms(self, event):
+                    raise TestException(marker=bf_marker)
+
+            h0 = PIDHistory()
+            h1 = PIDHistory()
+            h2 = PIDHistory()
+
+            z = PIDPlus(modifiers=(h0, BaseFail(), h1, FailFail(), h2))
+            try:
+                z.pid(0, dt=0.25)
+            except TestException as e:
+                self.assertEqual(e.test_exception_marker, ff_marker)
+            else:
+                raise ValueError("Did not get testException")
+
+            # all three histories shoudl have the same length, because the
+            # exceptions turn into PIDHookFailure events and so everything
+            # should track 1:1 in terms of length and related events in
+            # this case (wouldn't be true if nested events were triggered)
+            self.assertEqual(len(h0.history), len(h1.history))
+            self.assertEqual(len(h0.history), len(h2.history))
+
+            # convenience
+            last0 = h0.history[-1]
+            last1 = h1.history[-1]
+            last2 = h2.history[-1]
+
+            # the last entry in h0 should be the BaseTerms event
+            self.assertTrue(isinstance(last0, PIDHookBaseTerms))
+
+            # the last entry in h1 should be a PIDHookFailure event
+            # with the exception having the bf_marker in it
+            self.assertTrue(isinstance(last1, PIDHookFailure))
+            self.assertEqual(last1.exc.test_exception_marker, bf_marker)
+
+            # the last entry in h2 should be a PIDHookFailure event
+            # with the exception having the ff marker in it and check the
+            # event stack in the exceptions
+            self.assertTrue(isinstance(last2, PIDHookFailure))
+            self.assertEqual(last2.exc.test_exception_marker, ff_marker)
+            self.assertEqual(last2.event.event, last1.event)
+
+        def test_handler_exceptions_2(self):
             # if handlers cause exceptions (other than HookStop) in
             # all likelihood the error is unrecoverable; however, the
             # notify system tries to at least let the other handlers
