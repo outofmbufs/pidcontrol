@@ -814,6 +814,9 @@ class EventPrint(PIDModifier):
         self.prefix = prefix
         self.no_nest = no_nest
 
+    # one NestingFront is jammed onto the front of the modifiers list
+    # and one NestingBack is added at the end. This is how EventPrint
+    # tracks nesting depth for display/info purposes.
     class NestingFront(PIDModifier):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
@@ -840,8 +843,9 @@ class EventPrint(PIDModifier):
 
         # put the bookend modifiers in place (only once though!)
         if not self.no_nest:
-            if isinstance(event.pid.modifiers[0], self.NestingFront):
-                self.front = event.pid.modifiers[0]
+            m0 = event.pid.modifiers[0]
+            if isinstance(m0, self.NestingFront):
+                self.front = m0
             else:
                 self.front = self.NestingFront()
                 b = self.NestingBack(self.front)
