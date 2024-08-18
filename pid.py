@@ -1349,6 +1349,45 @@ if __name__ == "__main__":
                         p = klass(**pidargs)
                         _onetest(p, **testargs)
 
+        def test_KTT(self):
+            # Test the suggestions in the README file on how to create a PID
+            # that takes Ti/Td argument forms. This interface adapter class
+            # (KTTPID) allows either form; it is pasted from the README
+
+            class KTTPID(PID):
+                def __init__(self, *args, Ti=None, Td=None, **kwargs):
+                    try:
+                        Kp = kwargs['Kp']
+                    except KeyError:
+                        if (Ti is not None or Td is not None):
+                            raise TypeError("Ti or Td requires Kp") from None
+                    if Ti is not None:
+                        if 'Ki' in kwargs:
+                            raise TypeError("Can't have both Ti and Ki")
+                        kwargs['Ki'] = Kp / Ti if Ti != 0 else 0
+                    if Td is not None:
+                        if 'Kd' in kwargs:
+                            raise TypeError("Can't have both Td and Kd")
+                        kwargs['Kd'] = Kp * Td
+                    super().__init__(*args, **kwargs)
+
+            # great example of the magic of multiple inheritance and the mro
+            class KTTPlus(KTTPID, PIDPlus):
+                pass
+
+            for args in (dict(Kp=100, Ti=2, Td=0.1),):
+                with self.subTest(args=args):
+                    z = KTTPID(**args)
+                    Kp = args.get('Kp')
+                    Ti = args.get('Ti')
+                    Td = args.get('Td')
+                    if Kp is not None:
+                        self.assertEqual(z.Kp, Kp)
+                    if Ti is not None:
+                        self.assertEqual(z.Ki, Kp / Ti)
+                    if Td is not None:
+                        self.assertEqual(z.Kd, Kp * Td)
+
         def test_movingpv_D(self):
             # basically the same as test_simple/_onetest but this
             # has the process variable moving and tests the D term,
