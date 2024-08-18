@@ -216,8 +216,6 @@ will print:
 
 This demonstrates that the SetpointChange event in the "Running pid()" section was generated from within a BaseTerms handler (which in this case is part of how SetpointRamp is implemented).
 
-The indentation feature can be turned off: `EventPrint(no_nest=True)`.
-
 A prefix can be added to each line: `EventPrint(prefix='blahblah')`. This might be useful if using more than one EventPrint in a single modifiers list.
 
 To do something other than print, subclass the modifier and override the `printevent()` method (see the source). This might be a useful way to log events rather than print them, for example:
