@@ -63,6 +63,29 @@ Support for the `Ti` ("integration time") and `Td` ("derivative time") form of c
     Kd = Kp * Td
 
 
+Alternatively, something like this could be used to allow either form:
+
+
+    class KTTPID(PID):
+        """Allow Kp/Ti/Td form (also still allow Ki/Kd form)"""
+        def __init__(self, *args, Ti=None, Td=None, **kwargs):
+            try:
+                Kp = kwargs['Kp']
+            except KeyError:
+                if (Ti is not None or Td is not None):
+                    raise TypeError("Ti or Td requires Kp") from None
+
+            if Ti is not None:
+                if 'Ki' in kwargs:
+                    raise TypeError("Can't have both Ti and Ki")
+                kwargs['Ki'] = Kp / Ti if Ti != 0 else 0
+            if Td is not None:
+                if 'Kd' in kwargs:
+                    raise TypeError("Can't have both Td and Kd")
+                kwargs['Kd'] = Kp * Td
+            super().__init__(*args, **kwargs)
+
+
 ## Derivative Term Calculation
 The PID() class calculates the derivative term based on the change of the process variable, not the change of the computed error (difference between setpoint and process variable). In applications where the setpoint never changes, the two computation methods are identical. In applications where the setpoint can change from time to time, using the computed error results in a one-interval spike (so-called "derivative-kick") in the D calculation; whereas using the process variable instead avoids this kick.
 
@@ -111,6 +134,16 @@ The following features are available as `PIDPlus` modifiers:
 - **Bang Bang**: This is probably rarely a useful modification; it was implemented primarily as a test of the PIDModifier system to see how far customization features could be pushed. This alters the behavior of the PID controller such that the control variable is always returned as a fully "on" value or a fully "off" value.
 
 - **Use Delta E for derivative**: This changes the algorithm so that the derivative term is computed based on the slope of the error term rather than the slope of the process variable. There is likely no real-world use for this plug-in but it is there so the two approaches can be compared.
+
+## Ti, Td vs Ki, Kd
+As with `PID`, `PIDPlus` does not directly support Ti/Td gain forms; applications can do their own `K` form conversion.
+
+Alternatively, if the `KTTPID` class shown earlier has been defined, a `KTTPlus` can be defined this way:
+
+    class KTTPlus(KTTPID, PIDPlus):
+        pass
+
+and through the miracle of python's multiple-inheritance system ("super() is super!") this combines the Ti/Td conversion with `PIDPlus` instead of `PID`.
 
 ## Using PIDPlus with Modifiers
 
