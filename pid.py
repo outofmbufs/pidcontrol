@@ -175,6 +175,9 @@ class PIDPlus(PID):
             except TypeError:
                 self.modifiers = (modifiers,)
 
+        # Tracks nested notification level (see notify()/_notify())
+        self.nn_level = 0
+
         # let each modifier know it has been attached to this pid
         self.notify(PIDHookAttached())
 
@@ -290,6 +293,16 @@ class PIDPlus(PID):
         when the returned event is needed even after the notify()
         """
 
+        # This dance allows EventPrint to indent nested event notifications
+        self.nn_level += 1
+        try:
+            rv = self._notify(event, modifiers=modifiers)
+        finally:
+            self.nn_level -= 1
+        return rv
+
+    def _notify(self, event, /, *, modifiers=None):
+        """The guts of notify(). (notify() itself just maintains nn_level)"""
         if modifiers is None:
             modifiers = self.modifiers
 
@@ -784,86 +797,23 @@ class PIDHistory(PIDModifier):
         return s + ")"
 
 
-# EventPrint is a helpful debugging/learning tool.
-# Once upon a time this started out as simple as:
-#       class EventPrint(PIDModifier):
-#           def PH_default(self, event):
-#               print(event)
-#
-# but of course over time the tyranny of "wouldn't it be nice if..." has led
-# to this implementation. On the plus side, it has more capabilities:
-#
-# NESTING: By default, events will be indented if they were generated
-#          by handlers causing nested events (this happens, for example,
-#          in SetpointRamp). Because the way that works involves some
-#          amazing violence on the modifiers list, it can also be turned
-#          off by specifying 'no_nest=True' (default is False).
-#
-# PREFIX:  Since it is possible to put more than one EventPrint in a
-#          modifiers list, prefix="foo" allows specifying text to be
-#          put at the front of each EventPrint output line.
-#
-# LOGGING: Code has been structured so that printevent() can be easily
-#          overridden in a subclass if, for example, it would rather
-#          log the output than simply print() it.
-#
 class EventPrint(PIDModifier):
     """Event printer, helpful for debug and learning."""
-    def __init__(self, *args, prefix="", no_nest=False, **kwargs):
+    def __init__(self, *args, prefix="", **kwargs):
         super().__init__(*args, **kwargs)
         self.prefix = prefix
-        self.no_nest = no_nest
-
-    # one NestingFront is jammed onto the front of the modifiers list
-    # and one NestingBack is added at the end. This is how EventPrint
-    # tracks nesting depth for display/info purposes.
-    class NestingFront(PIDModifier):
-        def __init__(self, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            self._nesting = 0
-
-        def PH_default(self, event):
-            self._nesting += 1
-
-    class NestingBack(PIDModifier):
-        def __init__(self, front, *args, **kwargs):
-            super().__init__(*args, **kwargs)
-            self.front = front
-
-        def PH_default(self, event):
-            # note that this works even if event is PIDHookHookStopped
-            # (i.e., some handler in between raised HookStop). This
-            # still gets invoked and the event itself is of no concern.
-            self.front._nesting -= 1
-
-    def PH_attached(self, event):
-        """Perform outrageous violence to make nesting display work."""
-        # have to do this manually because PH_default won't see this event
-        self.printevent(event)
-
-        # put the bookend modifiers in place (only once though!)
-        if not self.no_nest:
-            m0 = event.pid.modifiers[0]
-            if isinstance(m0, self.NestingFront):
-                self.front = m0
-            else:
-                self.front = self.NestingFront()
-                b = self.NestingBack(self.front)
-                event.pid.modifiers = (self.front, *event.pid.modifiers, b)
-
-    def nesting_level(self, event):
-        try:
-            return self.front._nesting
-        except AttributeError:
-            return 1
 
     # override this to log, or do something else, if desired
-    # Can still call nesting_level() if need to perform indentation
     def printevent(self, event):
-        indent = "  " * (self.nesting_level(event) - 1)
+        indent = "  " * (event.pid.nn_level - 1)
         print(f"{self.prefix}{indent}{event}")
 
     def PH_default(self, event):
+        # Although subclasses *could* just override PH_default, giving
+        # them this other method (printevent) to override decouples them
+        # from "knowing" PH_default is the only handler. Indeed, in the
+        # past there was also a PH_attached handler Because Reasons even
+        # though now it's gone.
         self.printevent(event)
 
 
@@ -1979,7 +1929,7 @@ if __name__ == "__main__":
                     self._nestings = []
 
                 def printevent(self, event):
-                    self._nestings.append((event, self.nesting_level(event)))
+                    self._nestings.append((event, event.pid.nn_level))
 
             with self.assertRaises(TestException):
                 h = PIDHistory()
