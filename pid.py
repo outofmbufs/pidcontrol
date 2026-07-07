@@ -730,9 +730,9 @@ class PIDHistory(PIDModifier):
         #
         #   2) If this PIDHistory is not the last in the modifier list then
         #      subsequent handlers might modify event, which will change this
-        #      entry. Presumably
-        #      of putting this earlier in the modifiers list was to capture
-        #      the state NOW ... so that's another need to copy it.
+        #      entry. Presumably the point of putting this earlier in the
+        #      modifiers list was to capture the state NOW ... so that's
+        #      another need to copy it.
         e2 = copy.copy(event)
         if self.detail:
             try:
